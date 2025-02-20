@@ -112,6 +112,12 @@ var nativeTunCmd = &cobra.Command{
 			log.Println("Warning: MTU is not the default 1280. This is not supported. Packet loss and other issues may occur.")
 		}
 
+		setIproute2, err := cmd.Flags().GetBool("no-iproute2")
+		if err != nil {
+			cmd.Printf("Failed to get no set address: %v\n", err)
+			return
+		}
+
 		log.Printf("Establishing MASQUE connection to %s:%d (%s)", endpoint.IP, endpoint.Port, sni)
 
 		udpConn, tr, ipConn, rsp, err := api.ConnectTunnel(
@@ -150,34 +156,41 @@ var nativeTunCmd = &cobra.Command{
 
 		log.Printf("created TUN device: %s", dev.Name())
 
-		link, err := netlink.LinkByName(dev.Name())
-		if err != nil {
-			log.Fatalf("failed to get link: %v", err)
-		}
+		if !setIproute2 {
+			link, err := netlink.LinkByName(dev.Name())
+			if err != nil {
+				log.Fatalf("failed to get link: %v", err)
+			}
 
-		if err := netlink.LinkSetMTU(link, mtu); err != nil {
-			log.Fatalf("failed to set MTU: %v", err)
-		}
-		if !tunnelIPv4 {
-			if err := netlink.AddrAdd(link, &netlink.Addr{
-				IPNet: &net.IPNet{
-					IP:   net.ParseIP(config.AppConfig.IPv4),
-					Mask: net.CIDRMask(32, 32),
-				}}); err != nil {
-				log.Fatalf("failed to add address: %v", err)
+			if err := netlink.LinkSetMTU(link, mtu); err != nil {
+				log.Fatalf("failed to set MTU: %v", err)
 			}
-		}
-		if !tunnelIPv6 {
-			if err := netlink.AddrAdd(link, &netlink.Addr{
-				IPNet: &net.IPNet{
-					IP:   net.ParseIP(config.AppConfig.IPv6),
-					Mask: net.CIDRMask(128, 128),
-				}}); err != nil {
-				log.Fatalf("failed to add address: %v", err)
+			if !tunnelIPv4 {
+				if err := netlink.AddrAdd(link, &netlink.Addr{
+					IPNet: &net.IPNet{
+						IP:   net.ParseIP(config.AppConfig.IPv4),
+						Mask: net.CIDRMask(32, 32),
+					}}); err != nil {
+					log.Fatalf("failed to add address: %v", err)
+				}
 			}
-		}
-		if err := netlink.LinkSetUp(link); err != nil {
-			log.Fatalf("failed to set link up: %v", err)
+			if !tunnelIPv6 {
+				if err := netlink.AddrAdd(link, &netlink.Addr{
+					IPNet: &net.IPNet{
+						IP:   net.ParseIP(config.AppConfig.IPv6),
+						Mask: net.CIDRMask(128, 128),
+					}}); err != nil {
+					log.Fatalf("failed to add address: %v", err)
+				}
+			}
+			if err := netlink.LinkSetUp(link); err != nil {
+				log.Fatalf("failed to set link up: %v", err)
+			}
+		} else {
+			log.Println("Skipping IP address and link setup. You should set the link up manually.")
+			log.Println("Config has the following IP addresses:")
+			log.Printf("IPv4: %s", config.AppConfig.IPv4)
+			log.Printf("IPv6: %s", config.AppConfig.IPv6)
 		}
 		time.Sleep(500 * time.Millisecond)
 
@@ -228,5 +241,6 @@ func init() {
 	nativeTunCmd.Flags().DurationP("keepalive-period", "k", 30*time.Second, "Keepalive period for MASQUE connection")
 	nativeTunCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	nativeTunCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
+	nativeTunCmd.Flags().BoolP("no-iproute2", "I", false, "Do not set up IP addresses and do not set the link up")
 	rootCmd.AddCommand(nativeTunCmd)
 }
