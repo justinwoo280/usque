@@ -10,6 +10,7 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
           - [🥚➡️🍏🍎](#️)
   - [Table of Contents](#table-of-contents)
   - [Installation](#installation)
+  - [Building from source](#building-from-source)
     - [Docker](#docker)
   - [Usage](#usage)
     - [Registration](#registration)
@@ -40,7 +41,13 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
 
 ## Installation
 
-For now, this project is in the early research phase, so no CI or prebuilt binaries are available. You will need to build the project yourself. Since the tool is written in Go, it should be rather trivial.
+You can download the latest release from the [releases page](https://github.com/Diniboy1123/usque/releases). For now, Android (`arm64`), Linux (`armv5`, `armv6`, `armv7`, `arm64`, `amd64`) and Windows (`arm64`, `amd64`) binaries are provided. **However only the Linux `amd64` binary was tested.** If you have a different platform, you can build from source.
+
+Extract the archive and you will find a binary named `usque` in the root directory. You can move this binary to a directory in your `PATH` to make it accessible from anywhere.
+
+## Building from source
+
+Since the tool is written in Go, it should be rather trivial.
 
 1. Ensure that you have Go installed on your system. You can download it from [here](https://golang.org/dl/). At least Go 1.22 is required.
 2. Clone this repository and switch to the project's root directory
