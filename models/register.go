@@ -53,7 +53,7 @@ type Account struct {
 	// Updated not set for ZeroTier
 	Updated string `json:"updated,omitempty"`
 	// Managed only set for ZeroTier
-	Managed bool `json:"managed,omitempty"`
+	Managed string `json:"managed,omitempty"`
 	// Organization only set for ZeroTier
 	Organization string `json:"organization,omitempty"`
 	// PremiumData not set for ZeroTier
