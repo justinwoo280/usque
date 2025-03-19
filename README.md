@@ -356,7 +356,7 @@ Native tunnels will not customize DNS. Whatever you have set on your system will
 
 This is primarily a CLI tool for now. However some efforts were made to document and expose certain functions that can be used to build your own applications. **I do not recommend this** as of now though, because the implementation is quite unstable and the API is subject to change. I also didn't do the best job at abstraction, because my primary goal was to get it working and the second goal was to make something easily readable. So instead of using it directly as a library, people can fork and plug in extra functionality as they wish. I am open to PRs that make the code more modular and easier to use as a library.
 
-As a starting point, you can reach out to the [`api/](api/) package. For examples, take a look at the [`cmd/`](cmd/) package.
+As a starting point, you can reach out to the [`api/`](api/) package. For examples, take a look at the [`cmd/`](cmd/) package.
 
 ## Known Issues
 
