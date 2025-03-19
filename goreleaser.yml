@@ -1,4 +1,5 @@
 project_name: usque
+version: 2
 builds:
   - id: android
     goos:
@@ -57,7 +58,8 @@ builds:
       - "-X github.com/Diniboy1123/usque/cmd.date={{.Date}}"
 
 archives:
-  - format: tar.gz
+  - formats:
+    - zip
     name_template: "usque_{{.Version}}_{{.Os}}_{{.Arch}}{{if .Arm}}v{{.Arm}}{{end}}"
     files:
       - LICENSE.md
