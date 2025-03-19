@@ -176,35 +176,11 @@ var portFwCmd = &cobra.Command{
 			remotePortMappings = append(remotePortMappings, portMapping)
 		}
 
-		log.Printf("Establishing MASQUE connection to %s:%d (%s)\n", endpoint.IP, endpoint.Port, sni)
-
-		udpConn, tr, ipConn, rsp, err := api.ConnectTunnel(
-			context.Background(),
-			tlsConfig,
-			internal.DefaultQuicConfig(keepalivePeriod, initialPacketSize),
-			internal.ConnectURI,
-			endpoint,
-		)
+		reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
 		if err != nil {
-			cmd.Printf("Failed to connect tunnel: %v\n", err)
+			cmd.Printf("Failed to get reconnect delay: %v\n", err)
 			return
 		}
-		if tr != nil {
-			defer tr.Close()
-		}
-		if udpConn != nil {
-			defer udpConn.Close()
-		}
-		defer ipConn.Close()
-
-		if rsp.StatusCode != 200 {
-			cmd.Printf("Failed to connect tunnel: %s\n", rsp.Status)
-			return
-		}
-
-		log.Println("Connected to MASQUE server, creating virtual tunnel")
-
-		time.Sleep(500 * time.Millisecond)
 
 		tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
 		if err != nil {
@@ -213,45 +189,7 @@ var portFwCmd = &cobra.Command{
 		}
 		defer tunDev.Close()
 
-		go func() {
-			packetBufs := make([][]byte, 1)
-			for i := range packetBufs {
-				packetBufs[i] = make([]byte, mtu)
-			}
-			sizes := make([]int, 1)
-
-			for {
-				_, err := tunDev.Read(packetBufs, sizes, 0)
-				if err != nil {
-					log.Fatalf("failed to read from TUN device: %v\n", err)
-				}
-
-				icmp, err := ipConn.WritePacket(packetBufs[0][:sizes[0]])
-				if err != nil {
-					log.Fatalf("failed to write to IP connection: %v", err)
-				}
-				if len(icmp) > 0 {
-					if _, err := tunDev.Write([][]byte{icmp}, 0); err != nil {
-						log.Fatalf("failed to write ICMP to TUN device: %v", err)
-					}
-				}
-			}
-		}()
-
-		go func() {
-			for {
-				b := make([]byte, mtu)
-				n, err := ipConn.ReadPacket(b, true)
-				if err != nil {
-					log.Fatalf("failed to read from IP connection: %v", err)
-				}
-
-				_, err = tunDev.Write([][]byte{b[:n]}, 0)
-				if err != nil {
-					log.Fatalf("failed to write to TUN device: %v\n", err)
-				}
-			}
-		}()
+		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
 
 		log.Printf("Virtual tunnel created, forwarding ports")
 

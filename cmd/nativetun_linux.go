@@ -118,35 +118,11 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
-		log.Printf("Establishing MASQUE connection to %s:%d (%s)", endpoint.IP, endpoint.Port, sni)
-
-		udpConn, tr, ipConn, rsp, err := api.ConnectTunnel(
-			context.Background(),
-			tlsConfig,
-			internal.DefaultQuicConfig(keepalivePeriod, initialPacketSize),
-			internal.ConnectURI,
-			endpoint,
-		)
+		reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
 		if err != nil {
-			cmd.Printf("Failed to connect tunnel: %v\n", err)
+			cmd.Printf("Failed to get reconnect delay: %v\n", err)
 			return
 		}
-		if tr != nil {
-			defer tr.Close()
-		}
-		if udpConn != nil {
-			defer udpConn.Close()
-		}
-		defer ipConn.Close()
-
-		if rsp.StatusCode != 200 {
-			cmd.Printf("Failed to connect tunnel: %s\n", rsp.Status)
-			return
-		}
-
-		log.Println("Connected to MASQUE server, creating native tunnel")
-
-		time.Sleep(500 * time.Millisecond)
 
 		dev, err := water.New(water.Config{DeviceType: water.TUN})
 		if err != nil {
@@ -192,39 +168,8 @@ var nativeTunCmd = &cobra.Command{
 			log.Printf("IPv4: %s", config.AppConfig.IPv4)
 			log.Printf("IPv6: %s", config.AppConfig.IPv6)
 		}
-		time.Sleep(500 * time.Millisecond)
 
-		go func() {
-			for {
-				b := make([]byte, mtu)
-				n, err := ipConn.ReadPacket(b, true)
-				if err != nil {
-					log.Fatalf("failed to read from connection: %v", err)
-				}
-				if _, err := dev.Write(b[:n]); err != nil {
-					log.Fatalf("failed to write to TUN: %v", err)
-				}
-			}
-		}()
-
-		go func() {
-			for {
-				b := make([]byte, mtu)
-				n, err := dev.Read(b)
-				if err != nil {
-					log.Fatalf("failed to read from TUN: %v", err)
-				}
-				icmp, err := ipConn.WritePacket(b[:n])
-				if err != nil {
-					log.Fatalf("failed to write to connection: %v", err)
-				}
-				if len(icmp) > 0 {
-					if _, err := dev.Write(icmp); err != nil {
-						log.Printf("failed to write ICMP packet: %v", err)
-					}
-				}
-			}
-		}()
+		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewWaterAdapter(dev), mtu, reconnectDelay)
 
 		log.Println("Tunnel established, you may now set up routing and DNS")
 
@@ -242,5 +187,6 @@ func init() {
 	nativeTunCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	nativeTunCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	nativeTunCmd.Flags().BoolP("no-iproute2", "I", false, "Do not set up IP addresses and do not set the link up")
+	nativeTunCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
 	rootCmd.AddCommand(nativeTunCmd)
 }

@@ -2,10 +2,6 @@
 
 🥚➡️🍏🍎
 
-
-> [!NOTE]
-> This is all in early development and not yet ready for production use. Read [known issues](#known-issues) for more information.
-
 Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE protocol. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel mode (currently Linux only), a SOCKS5 proxy mode, and a HTTP proxy mode.
 
 ## Table of Contents
@@ -364,9 +360,8 @@ As a starting point, you can reach out to the [`api/](api/) package. For example
 
 ## Known Issues
 
-- **remote end disconnects**: If you are inactive for a while, the remote end might disconnect you with a `H3_NO_ERROR` error. Similar behavior was observed earlier on their well studied `WireGuard` implementation where too long open connections with not significant network activity were disconnected. While the official client seems to be able to keep the connection alive, this tool doesn't. I know the reason, but unsure which path to take to fix the issue yet. Regular browsing using SOCKS for example usually produces enough traffic that the tunnel remains stable for a long time. **As a workaround please do not consider generating artificial traffic as this is bad for the environment and we don't want to DoS Cloudflare either. Remember, this service is also offered for free, and with abuse you will most likely get this tool sanctioned.** Wait for a fix instead.
-- **no reconnection attempts when connection dies**: That one is kind of intended as this is merely a research/proof of concept project. However I can see how this can be frustrating for users. PRs are welcome.
-  - **interaction with the Cloudflare API is limited**: This one is also intended. The tool's primary focus is MASQUE. If you want better support, I suggest the official client or [wgcf](https://github.com/ViRb3/wgcf).
+- **remote end disconnects**: If you are inactive for a while, the remote end might disconnect you with a `H3_NO_ERROR` error. Similar behavior was observed earlier on their well studied `WireGuard` implementation where too long open connections with not significant network activity were disconnected. The official apps just reconnect once that happens, therefore I implemented a similar behavior. Therefore if you see disconnects, don't worry, it's probably just the remote end. The tool will reconnect automatically.
+- **interaction with the Cloudflare API is limited**: This one is also intended. The tool's primary focus is MASQUE. If you want better support, I suggest the official client or [wgcf](https://github.com/ViRb3/wgcf).
 - **no support for WireGuard**: This is a MASQUE client. If you want WireGuard, use the official client or [wgcf](https://github.com/ViRb3/wgcf).
 - **no support for DoH etc.**: Yeah, the official clients expose a lot of extra DNS related features. I wanted to keep this lightweight. Those will probably not be supported by me. If you want, you are free to use 3rd party DoH clients and configure them to use the tunnel interface. DNS over Warp should already be working on all modes except for the native tunnel mode as all DNS queries made inside the tunnel will go through the tunnel.
 - **slow initial speeds**: You may experience slow speeds when opening a new connection that can gradually increase by time. This is due to the `reno` congestion control algorithm used by `quic-go`. It is not the most performant one out there, especially not for high latency environments. We have to wait for support for different congestion control algorithms and see how they compare. For instance there is an open issue for [BBR](https://github.com/quic-go/quic-go/issues/4565).
