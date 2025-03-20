@@ -2,7 +2,7 @@
 
 🥚➡️🍏🍎
 
-Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE protocol. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel mode (currently Linux only), a SOCKS5 proxy mode, and a HTTP proxy mode.
+Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel (currently Linux only), a SOCKS5 proxy, and a HTTP proxy.
 
 ## Table of Contents
 
@@ -433,7 +433,7 @@ This tool wouldn't exist without the following incredible projects. Please go an
 
 - [Cloudflare Blogs](https://blog.cloudflare.com/) - They have some interesting insights documented across their blogs. I learned some bits and pieces from there.
 - [cobra](github.com/spf13/cobra) - Powerful CLI library for Go. Used for the CLI interface. Absolutely love it.
-- [connect-ip-go](https://github.com/quic-go/connect-ip-go) - The only open-source implementation for `RFC 9484` I could find. Our entire IP tunneling depends on this. We rely on my fork of this project heavily.
+- [connect-ip-go](https://github.com/quic-go/connect-ip-go) - ~~The only open-source implementation for `RFC 9484` I could find.~~ (this is not true anymore, [see](RESEARCH.md#interesting-other-connect-ip-related-projects)) Our entire IP tunneling depends on this. We rely on my fork of this project heavily.
 - [Frida](https://frida.re/) - This was a huge help for dynamic analysis of the official client. I was able to see what was going on in the app in real time and dumping certain values.
 - [frida-interception-and-unpinning](https://github.com/httptoolkit/frida-interception-and-unpinning/tree/4d477da) - Very good at unpinning cert. pinning, so I could explore how API calls were made by the app.
 - [friTap](https://github.com/fkie-cad/friTap) - For being an exceptionally well written and easy to use Frida script that one can use to dump TLS secrets effortlessly.

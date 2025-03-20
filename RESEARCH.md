@@ -17,6 +17,8 @@ It took me months to get this all figured out *(though there is a lot of room fo
   - [WireShark inspection of the decrypted traffic](#wireshark-inspection-of-the-decrypted-traffic)
   - [Final thoughts](#final-thoughts)
   - [Extras](#extras)
+  - [Interesting other CONNECT-IP related projects](#interesting-other-connect-ip-related-projects)
+  - [Interesting other QUIC related projects](#interesting-other-quic-related-projects)
 
 ## Initial poking
 
@@ -285,3 +287,19 @@ Anyway this was a great learning experience for me both technically as I learnt 
 ## Extras
 
 - [cryptobufferhook.js](_docs/research/cryptobufferhook.js) - A frida script that hooks into the `CRYPTO_BUFFER_new` functions in BoringSSL to dump the buffers. I used this to dump the client certificate used by the client for connection to the remote endpoint so I could compare it with my code and figure that they generate a new certificate for every connection and each certificate is valid for 24 hours. I am not sure why are they doing that though... If one could get their hands on the cert, that wouldn't be enough to authenticate, because they need the private key as well. But once you have the private key, you can generate new certs for yourself. So yeah, I am not sure what's the point of this.
+
+## Interesting other CONNECT-IP related projects
+
+- [connect-ip-go](https://github.com/quic-go/connect-ip-go) - A Go implementation of RFC 9484 that uses [quic-go](https://github.com/quic-go/quic-go) for the QUIC part. I found it very easy to read and understand, but it lacks IP Forwarding support as of now.
+- [Google quiche's masque implementation](https://github.com/google/quiche/tree/main/quiche/quic/masque) - Very cool prototype MASQUE implementation with support for `CONNECT-UDP`, `CONNECT-IP` and even `CONNECT-ETHERNET` modes as it was [brought to my attention](https://github.com/Diniboy1123/usque/issues/6). Seems to be a small, yet feature packed codebase with a strong focus on RFC compliance.
+- [masquerade](https://github.com/ErikBcd/masquerade) - Awesome stuff on top of the original [project](https://github.com/jromwu/masquerade) extending it with `CONNECT-IP` support. Comes with both a server and a client both written in Rust. Great practical example that relies on Cloudflare's quiche for the QUIC part.
+
+## Interesting other QUIC related projects
+
+- [aioquic](https://github.com/aiortc/aioquic) - A Python implementation of QUIC and HTTP/3.
+- [Cloudflare quiche](https://github.com/cloudflare/quiche) - Cloudflare's take on QUIC and HTTP/3 written in rust. Unfortunately lacks out of the box support for MASQUE as of now, but provides a really low level API to work with QUIC, therefore making it a great choice for custom implementations. [tokio-quiche](https://github.com/cloudflare/quiche/tree/master/tokio-quiche) was recently open-sourced by them, which makes handling many QUIC connections a piece of cake.
+- [Google quiche](https://github.com/google/quiche) - Google's implementation of QUIC, HTTP/2, HTTP/3, **MASQUE** and more in C++. Mature and seemingly used by Chromium.
+- [msquic](https://github.com/microsoft/msquic) - Microsoft's performant QUIC implementation in C. As far as I can tell, lacks HTTP/3 support out of the box. Comes with bindings for C# and Rust.
+- [quic-go](https://github.com/quic-go/quic-go) - A Go implementation of QUIC and HTTP/3. Great library with large test coverage.
+
+This list is not exhaustive—there are many ongoing efforts to implement QUIC and MASQUE. These are the ones I encountered, used in my research, or found interesting for future reference. For a more comprehensive list of QUIC implementations, check out [this resource](https://github.com/quicwg/base-drafts/wiki/Implementations). If you know of another interesting project that should be added, let me know!
