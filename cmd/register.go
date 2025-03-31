@@ -53,7 +53,7 @@ var registerCmd = &cobra.Command{
 
 		log.Printf("Registering with locale %s and model %s", locale, model)
 
-		accountData, err := api.Register(model, locale)
+		accountData, err := api.Register(model, locale, false)
 		if err != nil {
 			log.Fatalf("Failed to register: %v", err)
 		}
