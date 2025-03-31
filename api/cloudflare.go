@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -101,11 +102,11 @@ func Register(model, locale string) (models.AccountData, error) {
 //
 // Example:
 //
-//	updatedAccount, err := EnrollKey(account, pubKey)
+//	updatedAccount, apiErr, err := EnrollKey(account, pubKey, "PC")
 //	if err != nil {
 //	    log.Fatalf("Key enrollment failed: %v", err)
 //	}
-func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string) (models.AccountData, error) {
+func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string) (models.AccountData, *models.APIError, error) {
 	deviceUpdate := models.DeviceUpdate{
 		Key:     base64.StdEncoding.EncodeToString(pubKey),
 		KeyType: internal.KeyTypeMasque,
@@ -118,33 +119,41 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
 
 	jsonData, err := json.Marshal(deviceUpdate)
 	if err != nil {
-		return models.AccountData{}, fmt.Errorf("failed to marshal json: %v", err)
+		return models.AccountData{}, nil, fmt.Errorf("failed to marshal json: %v", err)
 	}
 
 	req, err := http.NewRequest("PATCH", internal.ApiUrl+"/"+internal.ApiVersion+"/reg/"+accountData.ID, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return models.AccountData{}, fmt.Errorf("failed to create request: %v", err)
+		return models.AccountData{}, nil, fmt.Errorf("failed to create request: %v", err)
 	}
 
 	for k, v := range internal.Headers {
 		req.Header.Set(k, v)
 	}
-
 	req.Header.Set("Authorization", "Bearer "+accountData.Token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return models.AccountData{}, fmt.Errorf("failed to send request: %v", err)
+		return models.AccountData{}, nil, fmt.Errorf("failed to send request: %v", err)
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return models.AccountData{}, nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return models.AccountData{}, fmt.Errorf("failed to update: %v", resp.Status)
+		var apiErr models.APIError
+		if err := json.Unmarshal(body, &apiErr); err != nil {
+			return models.AccountData{}, nil, fmt.Errorf("failed to parse error response: %v", err)
+		}
+		return models.AccountData{}, &apiErr, fmt.Errorf("failed to update: %s", resp.Status)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&accountData); err != nil {
-		return models.AccountData{}, fmt.Errorf("failed to decode response: %v", err)
+	if err := json.Unmarshal(body, &accountData); err != nil {
+		return models.AccountData{}, nil, fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	return accountData, nil
+	return accountData, nil, nil
 }
