@@ -354,7 +354,7 @@ By default all modes except for the native tunnel mode will use [Quad9](https://
 For example:
 
 ```shell
-$ ./usque socks -d 1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001
+$ ./usque socks -d 1.1.1.1 -d 1.0.0.1 -d 2606:4700:4700::1111 -d 2606:4700:4700::1001
 ```
 
 Native tunnels will not customize DNS. Whatever you have set on your system will be preferred. Routing of DNS packets to the tunnel or somewhere else is also entirely up to you.
