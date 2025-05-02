@@ -116,7 +116,12 @@ $ ./usque register
 ```
 
 > [!TIP]
-> If you want to specify a name for the device, you may do so by specifying `-n desiredname`.
+> If you want to specify a name for the device, you may do so by specifying `-n <device-name>`.
+
+> [!TIP]
+> If you want to register with ZeroTrust, you need to obtain the team token and do so by specifying `--jwt <team-token>`.
+> 1. Visit `https://<team-domain>/warp` and complete the authentication process.
+> 2. Obtain the team token from the success page's source code, or execute the following command in the browser console: `console.log(document.querySelector("meta[http-equiv='refresh']").content.split("=")[2])`.
 
 If you didn't get rate-limited or any other error, you should see a `Successful registration` message and a working config. In case of certain issues such as rate limiting, you may need to wait a bit and try again.
 
@@ -308,7 +313,7 @@ Example config:
 
 In my view ZeroTrust is Cloudflare's enterprise version of WARP. Explaining this in depth would be beyond the scope of this README.
 
-While the tool won't be able to log you in to ZeroTrust *(as SSO is required for login there)* practice shows that you can get connection working if you really want to. For that you need to put together a config file manually. I suggest using the `register` command to obtain a personal WARP config. Keep all fields unchanged except for `access_token` and `id`. As for how to obtain these, be creative. For example both of these can be carved out from `/var/lib/cloudflare-warp/reg.json` if using the official WARP client on Linux. Or existing device IDs are listed in the ZeroTrust dashboard. Once these are in place, you can use the `enroll` command to refresh the config with the new data. You will see that the `license` field is empty. This is normal. ZeroTrust doesn't use licenses *(to my knowledge)*.
+While the tool won't be able to log you in to ZeroTrust *(as SSO is required for login there)* practice shows that you can get connection working if you really want to. For that you need to run `./usque register --jwt <jwt>` or put together a config file manually. If you choose to put together a config file manually, I suggest using the `register` command to obtain a personal WARP config. Keep all fields unchanged except for `access_token` and `id`. As for how to obtain these, be creative. For example both of these can be carved out from `/var/lib/cloudflare-warp/reg.json` if using the official WARP client on Linux. Or existing device IDs are listed in the ZeroTrust dashboard. Once these are in place, you can use the `enroll` command to refresh the config with the new data. You will see that the `license` field is empty. This is normal. ZeroTrust doesn't use licenses *(to my knowledge)*.
 
 Warp to warp communication is supported by all modes of this tool if you have it [correctly set up](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/private-net/warp-to-warp/). Proxies and tunnels can reach services exposed on other devices and [port forwarding](#port-forwarding-mode-for-advanced-users-cross-platform) can be used to forward ports to and from the WARP network.
 
