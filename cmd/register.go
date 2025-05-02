@@ -56,13 +56,18 @@ var registerCmd = &cobra.Command{
 			log.Fatalf("Failed to get jwt: %v", err)
 		}
 
-		if (jwt != "") {
+		if jwt != "" {
 			log.Printf("Registering with locale %s and model %s using jwt authentication", locale, model)
 		} else {
 			log.Printf("Registering with locale %s and model %s", locale, model)
 		}
 
-		accountData, err := api.Register(model, locale, jwt, false)
+		acceptTos, err := cmd.Flags().GetBool("accept-tos")
+		if err != nil {
+			log.Fatalf("Failed to get accept-tos flag: %v", err)
+		}
+
+		accountData, err := api.Register(model, locale, jwt, acceptTos)
 		if err != nil {
 			log.Fatalf("Failed to register: %v", err)
 		}
@@ -111,5 +116,6 @@ func init() {
 	registerCmd.Flags().StringP("model", "m", internal.DefaultModel, "model")
 	registerCmd.Flags().StringP("name", "n", "", "device name")
 	registerCmd.Flags().String("jwt", "", "team token")
+	registerCmd.Flags().BoolP("accept-tos", "a", false, "accept Cloudflare TOS (not interactive setup)")
 	rootCmd.AddCommand(registerCmd)
 }
