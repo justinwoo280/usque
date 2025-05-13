@@ -34,8 +34,8 @@ func (n *NetBuffer) New(capacity int) {
 	if capacity <= 0 {
 		panic("capacity must be greater than 0")
 	}
-	if capacity < 2048 {
-		capacity = 2048
+	if capacity < 1280 {
+		capacity = 1280
 	}
 	n.capacity = capacity
 	n.buf.New = func() interface{} {
@@ -61,7 +61,7 @@ var (
 // regardless of the underlying implementation.
 type TunnelDevice interface {
 	// ReadPacket reads a packet from the device (using the given mtu) and returns its contents.
-	ReadPacket(mtu int) ([]byte, error)
+	ReadPacket(buf []byte) (int, error)
 	// WritePacket writes a packet to the device.
 	WritePacket(pkt []byte) error
 }
@@ -71,10 +71,7 @@ type NetstackAdapter struct {
 	dev tun.Device
 }
 
-func (n *NetstackAdapter) ReadPacket(mtu int) ([]byte, error) {
-	// For netstack TUN devices we need to use the multi-buffer interface.
-	packetBuf := packetBufferPool.Get()
-
+func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
 	packetBufs := tunnelBufPool.Get().([][]byte)
 	sizes := tunnelSizesPool.Get().([]int)
 
@@ -84,20 +81,17 @@ func (n *NetstackAdapter) ReadPacket(mtu int) ([]byte, error) {
 		tunnelSizesPool.Put(sizes)
 	}()
 
-	packetBufs[0] = packetBuf
+	packetBufs[0] = buf
 	sizes[0] = 0
 
 	_, err := n.dev.Read(packetBufs, sizes, 0)
 	if err != nil {
 		packetBufferPool.Put(packetBufs[0])
-		return nil, err
+		return 0, err
 	}
 
-	result := make([]byte, sizes[0])
-	copy(result, packetBufs[0][:sizes[0]])
 	packetBufferPool.Put(packetBufs[0])
-
-	return result, nil
+	return sizes[0], nil
 }
 
 func (n *NetstackAdapter) WritePacket(pkt []byte) error {
@@ -116,17 +110,15 @@ type WaterAdapter struct {
 	iface *water.Interface
 }
 
-func (w *WaterAdapter) ReadPacket(mtu int) ([]byte, error) {
-	buf := packetBufferPool.Get()
+func (w *WaterAdapter) ReadPacket(buf []byte) (int, error) {
 	n, err := w.iface.Read(buf)
 	if err != nil {
 		packetBufferPool.Put(buf)
-		return nil, err
+		return 0, err
 	}
-	result := make([]byte, n)
-	copy(result, buf[:n])
+
 	packetBufferPool.Put(buf)
-	return result, nil
+	return n, nil
 }
 
 func (w *WaterAdapter) WritePacket(pkt []byte) error {
@@ -187,16 +179,21 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 
 		go func() {
 			for {
-				pkt, err := device.ReadPacket(mtu)
+				buf := packetBufferPool.Get()
+				n, err := device.ReadPacket(buf)
 				if err != nil {
+					packetBufferPool.Put(buf)
 					errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
 					return
 				}
-				icmp, err := ipConn.WritePacket(pkt)
+				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
+					packetBufferPool.Put(buf)
 					errChan <- fmt.Errorf("failed to write to IP connection: %v", err)
 					return
 				}
+				packetBufferPool.Put(buf)
+
 				if len(icmp) > 0 {
 					if err := device.WritePacket(icmp); err != nil {
 						errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
