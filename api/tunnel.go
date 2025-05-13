@@ -6,11 +6,55 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/Diniboy1123/usque/internal"
 	"github.com/songgao/water"
 	"golang.zx2c4.com/wireguard/tun"
+)
+
+type NetBuffer struct {
+	capacity int
+	buf      sync.Pool
+}
+
+func (n *NetBuffer) Get() []byte {
+	return n.buf.Get().([]byte)
+}
+
+func (n *NetBuffer) Put(buf []byte) {
+	if cap(buf) != n.capacity {
+		return
+	}
+	n.buf.Put(buf)
+}
+
+func (n *NetBuffer) New(capacity int) {
+	if capacity <= 0 {
+		panic("capacity must be greater than 0")
+	}
+	if capacity < 2048 {
+		capacity = 2048
+	}
+	n.capacity = capacity
+	n.buf.New = func() interface{} {
+		return make([]byte, capacity)
+	}
+}
+
+var (
+	tunnelBufPool = sync.Pool{
+		New: func() interface{} {
+			return make([][]byte, 1)
+		},
+	}
+	tunnelSizesPool = sync.Pool{
+		New: func() interface{} {
+			return make([]int, 1)
+		},
+	}
+	packetBufferPool NetBuffer
 )
 
 // TunnelDevice abstracts a TUN device so that we can use the same tunnel-maintenance code
@@ -29,14 +73,31 @@ type NetstackAdapter struct {
 
 func (n *NetstackAdapter) ReadPacket(mtu int) ([]byte, error) {
 	// For netstack TUN devices we need to use the multi-buffer interface.
-	packetBufs := make([][]byte, 1)
-	packetBufs[0] = make([]byte, mtu)
-	sizes := make([]int, 1)
+	packetBuf := packetBufferPool.Get()
+
+	packetBufs := tunnelBufPool.Get().([][]byte)
+	sizes := tunnelSizesPool.Get().([]int)
+
+	defer func() {
+		packetBufs[0] = nil
+		tunnelBufPool.Put(packetBufs)
+		tunnelSizesPool.Put(sizes)
+	}()
+
+	packetBufs[0] = packetBuf
+	sizes[0] = 0
+
 	_, err := n.dev.Read(packetBufs, sizes, 0)
 	if err != nil {
+		packetBufferPool.Put(packetBufs[0])
 		return nil, err
 	}
-	return packetBufs[0][:sizes[0]], nil
+
+	result := make([]byte, sizes[0])
+	copy(result, packetBufs[0][:sizes[0]])
+	packetBufferPool.Put(packetBufs[0])
+
+	return result, nil
 }
 
 func (n *NetstackAdapter) WritePacket(pkt []byte) error {
@@ -56,12 +117,16 @@ type WaterAdapter struct {
 }
 
 func (w *WaterAdapter) ReadPacket(mtu int) ([]byte, error) {
-	buf := make([]byte, mtu)
+	buf := packetBufferPool.Get()
 	n, err := w.iface.Read(buf)
 	if err != nil {
+		packetBufferPool.Put(buf)
 		return nil, err
 	}
-	return buf[:n], nil
+	result := make([]byte, n)
+	copy(result, buf[:n])
+	packetBufferPool.Put(buf)
+	return result, nil
 }
 
 func (w *WaterAdapter) WritePacket(pkt []byte) error {
@@ -89,6 +154,7 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 //   - mtu: int - The MTU of the TUN device.
 //   - reconnectDelay: time.Duration - The delay between reconnect attempts.
 func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod time.Duration, initialPacketSize uint16, endpoint *net.UDPAddr, device TunnelDevice, mtu int, reconnectDelay time.Duration) {
+	packetBufferPool.New(mtu)
 	for {
 		log.Printf("Establishing MASQUE connection to %s:%d", endpoint.IP, endpoint.Port)
 		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
@@ -141,7 +207,7 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 		}()
 
 		go func() {
-			buf := make([]byte, mtu)
+			buf := packetBufferPool.Get()
 			for {
 				n, err := ipConn.ReadPacket(buf, true)
 				if err != nil {
