@@ -14,6 +14,8 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
+var packetBufferPool *NetBuffer
+
 // NetBuffer is a pool of byte slices with a fixed capacity.
 // Helps to reduce memory allocations and improve performance.
 // It uses a sync.Pool to manage the byte slices.
@@ -25,7 +27,7 @@ type NetBuffer struct {
 
 // Get returns a byte slice from the pool.
 func (n *NetBuffer) Get() []byte {
-	return n.buf.Get().([]byte)
+	return *(n.buf.Get().(*[]byte))
 }
 
 // Put places a byte slice back into the pool.
@@ -35,26 +37,25 @@ func (n *NetBuffer) Put(buf []byte) {
 	if cap(buf) != n.capacity {
 		return
 	}
-	n.buf.Put(buf)
+	n.buf.Put(&buf)
 }
 
 // NewNetBuffer creates a new NetBuffer with the specified capacity.
 // The capacity must be greater than 0.
-func NewNetBuffer(capacity int) NetBuffer {
+func NewNetBuffer(capacity int) *NetBuffer {
 	if capacity <= 0 {
 		panic("capacity must be greater than 0")
 	}
-	return NetBuffer{
+	return &NetBuffer{
 		capacity: capacity,
 		buf: sync.Pool{
 			New: func() interface{} {
-				return make([]byte, capacity)
+				b := make([]byte, capacity)
+				return &b
 			},
 		},
 	}
 }
-
-var packetBufferPool NetBuffer
 
 // TunnelDevice abstracts a TUN device so that we can use the same tunnel-maintenance code
 // regardless of the underlying implementation.
@@ -73,26 +74,24 @@ type NetstackAdapter struct {
 }
 
 func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
-	packetBufs := n.tunnelBufPool.Get().([][]byte)
-	sizes := n.tunnelSizesPool.Get().([]int)
+	packetBufsPtr := n.tunnelBufPool.Get().(*[][]byte)
+	sizesPtr := n.tunnelSizesPool.Get().(*[]int)
 
 	defer func() {
-		packetBufs[0] = nil
-		n.tunnelBufPool.Put(packetBufs)
-		n.tunnelSizesPool.Put(sizes)
+		(*packetBufsPtr)[0] = nil
+		n.tunnelBufPool.Put(packetBufsPtr)
+		n.tunnelSizesPool.Put(sizesPtr)
 	}()
 
-	packetBufs[0] = buf
-	sizes[0] = 0
+	(*packetBufsPtr)[0] = buf
+	(*sizesPtr)[0] = 0
 
-	_, err := n.dev.Read(packetBufs, sizes, 0)
+	_, err := n.dev.Read(*packetBufsPtr, *sizesPtr, 0)
 	if err != nil {
-		packetBufferPool.Put(packetBufs[0])
 		return 0, err
 	}
 
-	packetBufferPool.Put(packetBufs[0])
-	return sizes[0], nil
+	return (*sizesPtr)[0], nil
 }
 
 func (n *NetstackAdapter) WritePacket(pkt []byte) error {
@@ -107,12 +106,14 @@ func NewNetstackAdapter(dev tun.Device) TunnelDevice {
 		dev: dev,
 		tunnelBufPool: sync.Pool{
 			New: func() interface{} {
-				return make([][]byte, 1)
+				buf := make([][]byte, 1)
+				return &buf
 			},
 		},
 		tunnelSizesPool: sync.Pool{
 			New: func() interface{} {
-				return make([]int, 1)
+				sizes := make([]int, 1)
+				return &sizes
 			},
 		},
 	}
@@ -126,11 +127,9 @@ type WaterAdapter struct {
 func (w *WaterAdapter) ReadPacket(buf []byte) (int, error) {
 	n, err := w.iface.Read(buf)
 	if err != nil {
-		packetBufferPool.Put(buf)
 		return 0, err
 	}
 
-	packetBufferPool.Put(buf)
 	return n, nil
 }
 
@@ -218,6 +217,7 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 
 		go func() {
 			buf := packetBufferPool.Get()
+			defer packetBufferPool.Put(buf)
 			for {
 				n, err := ipConn.ReadPacket(buf, true)
 				if err != nil {
