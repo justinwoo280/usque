@@ -38,19 +38,19 @@ func (n *NetBuffer) Put(buf []byte) {
 	n.buf.Put(buf)
 }
 
-// New creates a new NetBuffer with the specified capacity.
+// NewNetBuffer creates a new NetBuffer with the specified capacity.
 // The capacity must be greater than 0.
-func (n *NetBuffer) New(capacity int) {
+func NewNetBuffer(capacity int) NetBuffer {
 	if capacity <= 0 {
 		panic("capacity must be greater than 0")
 	}
-	// Reserved for future edit
-	//if capacity < 1280 {
-	//	capacity = 1280
-	//}
-	n.capacity = capacity
-	n.buf.New = func() interface{} {
-		return make([]byte, capacity)
+	return NetBuffer{
+		capacity: capacity,
+		buf: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, capacity)
+			},
+		},
 	}
 }
 
@@ -159,7 +159,7 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 //   - mtu: int - The MTU of the TUN device.
 //   - reconnectDelay: time.Duration - The delay between reconnect attempts.
 func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod time.Duration, initialPacketSize uint16, endpoint *net.UDPAddr, device TunnelDevice, mtu int, reconnectDelay time.Duration) {
-	packetBufferPool.New(mtu)
+	packetBufferPool = NewNetBuffer(mtu)
 	for {
 		log.Printf("Establishing MASQUE connection to %s:%d", endpoint.IP, endpoint.Port)
 		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
