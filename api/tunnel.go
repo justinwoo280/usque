@@ -34,9 +34,10 @@ func (n *NetBuffer) New(capacity int) {
 	if capacity <= 0 {
 		panic("capacity must be greater than 0")
 	}
-	if capacity < 1280 {
-		capacity = 1280
-	}
+	// Reserved for future edit
+	//if capacity < 1280 {
+	//	capacity = 1280
+	//}
 	n.capacity = capacity
 	n.buf.New = func() interface{} {
 		return make([]byte, capacity)
