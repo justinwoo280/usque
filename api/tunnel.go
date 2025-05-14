@@ -44,19 +44,7 @@ func (n *NetBuffer) New(capacity int) {
 	}
 }
 
-var (
-	tunnelBufPool = sync.Pool{
-		New: func() interface{} {
-			return make([][]byte, 1)
-		},
-	}
-	tunnelSizesPool = sync.Pool{
-		New: func() interface{} {
-			return make([]int, 1)
-		},
-	}
-	packetBufferPool NetBuffer
-)
+var packetBufferPool NetBuffer
 
 // TunnelDevice abstracts a TUN device so that we can use the same tunnel-maintenance code
 // regardless of the underlying implementation.
@@ -69,17 +57,19 @@ type TunnelDevice interface {
 
 // NetstackAdapter wraps a tun.Device (e.g. from netstack) to satisfy TunnelDevice.
 type NetstackAdapter struct {
-	dev tun.Device
+	dev             tun.Device
+	tunnelBufPool   sync.Pool
+	tunnelSizesPool sync.Pool
 }
 
 func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
-	packetBufs := tunnelBufPool.Get().([][]byte)
-	sizes := tunnelSizesPool.Get().([]int)
+	packetBufs := n.tunnelBufPool.Get().([][]byte)
+	sizes := n.tunnelSizesPool.Get().([]int)
 
 	defer func() {
 		packetBufs[0] = nil
-		tunnelBufPool.Put(packetBufs)
-		tunnelSizesPool.Put(sizes)
+		n.tunnelBufPool.Put(packetBufs)
+		n.tunnelSizesPool.Put(sizes)
 	}()
 
 	packetBufs[0] = buf
@@ -103,7 +93,19 @@ func (n *NetstackAdapter) WritePacket(pkt []byte) error {
 
 // NewNetstackAdapter creates a new NetstackAdapter.
 func NewNetstackAdapter(dev tun.Device) TunnelDevice {
-	return &NetstackAdapter{dev: dev}
+	return &NetstackAdapter{
+		dev: dev,
+		tunnelBufPool: sync.Pool{
+			New: func() interface{} {
+				return make([][]byte, 1)
+			},
+		},
+		tunnelSizesPool: sync.Pool{
+			New: func() interface{} {
+				return make([]int, 1)
+			},
+		},
+	}
 }
 
 // WaterAdapter wraps a *water.Interface so it satisfies TunnelDevice.
