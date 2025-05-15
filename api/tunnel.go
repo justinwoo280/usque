@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/Diniboy1123/usque/internal"
@@ -13,30 +14,82 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
+// NetBuffer is a pool of byte slices with a fixed capacity.
+// Helps to reduce memory allocations and improve performance.
+// It uses a sync.Pool to manage the byte slices.
+// The capacity of the byte slices is set when the pool is created.
+type NetBuffer struct {
+	capacity int
+	buf      sync.Pool
+}
+
+// Get returns a byte slice from the pool.
+func (n *NetBuffer) Get() []byte {
+	return *(n.buf.Get().(*[]byte))
+}
+
+// Put places a byte slice back into the pool.
+// It checks if the capacity of the byte slice matches the pool's capacity.
+// If it doesn't match, the byte slice is not returned to the pool.
+func (n *NetBuffer) Put(buf []byte) {
+	if cap(buf) != n.capacity {
+		return
+	}
+	n.buf.Put(&buf)
+}
+
+// NewNetBuffer creates a new NetBuffer with the specified capacity.
+// The capacity must be greater than 0.
+func NewNetBuffer(capacity int) *NetBuffer {
+	if capacity <= 0 {
+		panic("capacity must be greater than 0")
+	}
+	return &NetBuffer{
+		capacity: capacity,
+		buf: sync.Pool{
+			New: func() interface{} {
+				b := make([]byte, capacity)
+				return &b
+			},
+		},
+	}
+}
+
 // TunnelDevice abstracts a TUN device so that we can use the same tunnel-maintenance code
 // regardless of the underlying implementation.
 type TunnelDevice interface {
 	// ReadPacket reads a packet from the device (using the given mtu) and returns its contents.
-	ReadPacket(mtu int) ([]byte, error)
+	ReadPacket(buf []byte) (int, error)
 	// WritePacket writes a packet to the device.
 	WritePacket(pkt []byte) error
 }
 
 // NetstackAdapter wraps a tun.Device (e.g. from netstack) to satisfy TunnelDevice.
 type NetstackAdapter struct {
-	dev tun.Device
+	dev             tun.Device
+	tunnelBufPool   sync.Pool
+	tunnelSizesPool sync.Pool
 }
 
-func (n *NetstackAdapter) ReadPacket(mtu int) ([]byte, error) {
-	// For netstack TUN devices we need to use the multi-buffer interface.
-	packetBufs := make([][]byte, 1)
-	packetBufs[0] = make([]byte, mtu)
-	sizes := make([]int, 1)
-	_, err := n.dev.Read(packetBufs, sizes, 0)
+func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
+	packetBufsPtr := n.tunnelBufPool.Get().(*[][]byte)
+	sizesPtr := n.tunnelSizesPool.Get().(*[]int)
+
+	defer func() {
+		(*packetBufsPtr)[0] = nil
+		n.tunnelBufPool.Put(packetBufsPtr)
+		n.tunnelSizesPool.Put(sizesPtr)
+	}()
+
+	(*packetBufsPtr)[0] = buf
+	(*sizesPtr)[0] = 0
+
+	_, err := n.dev.Read(*packetBufsPtr, *sizesPtr, 0)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return packetBufs[0][:sizes[0]], nil
+
+	return (*sizesPtr)[0], nil
 }
 
 func (n *NetstackAdapter) WritePacket(pkt []byte) error {
@@ -47,7 +100,21 @@ func (n *NetstackAdapter) WritePacket(pkt []byte) error {
 
 // NewNetstackAdapter creates a new NetstackAdapter.
 func NewNetstackAdapter(dev tun.Device) TunnelDevice {
-	return &NetstackAdapter{dev: dev}
+	return &NetstackAdapter{
+		dev: dev,
+		tunnelBufPool: sync.Pool{
+			New: func() interface{} {
+				buf := make([][]byte, 1)
+				return &buf
+			},
+		},
+		tunnelSizesPool: sync.Pool{
+			New: func() interface{} {
+				sizes := make([]int, 1)
+				return &sizes
+			},
+		},
+	}
 }
 
 // WaterAdapter wraps a *water.Interface so it satisfies TunnelDevice.
@@ -55,13 +122,13 @@ type WaterAdapter struct {
 	iface *water.Interface
 }
 
-func (w *WaterAdapter) ReadPacket(mtu int) ([]byte, error) {
-	buf := make([]byte, mtu)
+func (w *WaterAdapter) ReadPacket(buf []byte) (int, error) {
 	n, err := w.iface.Read(buf)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return buf[:n], nil
+
+	return n, nil
 }
 
 func (w *WaterAdapter) WritePacket(pkt []byte) error {
@@ -89,6 +156,7 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 //   - mtu: int - The MTU of the TUN device.
 //   - reconnectDelay: time.Duration - The delay between reconnect attempts.
 func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod time.Duration, initialPacketSize uint16, endpoint *net.UDPAddr, device TunnelDevice, mtu int, reconnectDelay time.Duration) {
+	packetBufferPool := NewNetBuffer(mtu)
 	for {
 		log.Printf("Establishing MASQUE connection to %s:%d", endpoint.IP, endpoint.Port)
 		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
@@ -121,16 +189,21 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 
 		go func() {
 			for {
-				pkt, err := device.ReadPacket(mtu)
+				buf := packetBufferPool.Get()
+				n, err := device.ReadPacket(buf)
 				if err != nil {
+					packetBufferPool.Put(buf)
 					errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
 					return
 				}
-				icmp, err := ipConn.WritePacket(pkt)
+				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
+					packetBufferPool.Put(buf)
 					errChan <- fmt.Errorf("failed to write to IP connection: %v", err)
 					return
 				}
+				packetBufferPool.Put(buf)
+
 				if len(icmp) > 0 {
 					if err := device.WritePacket(icmp); err != nil {
 						errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
@@ -141,7 +214,8 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 		}()
 
 		go func() {
-			buf := make([]byte, mtu)
+			buf := packetBufferPool.Get()
+			defer packetBufferPool.Put(buf)
 			for {
 				n, err := ipConn.ReadPacket(buf, true)
 				if err != nil {
