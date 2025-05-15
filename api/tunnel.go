@@ -14,8 +14,6 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-var packetBufferPool *NetBuffer
-
 // NetBuffer is a pool of byte slices with a fixed capacity.
 // Helps to reduce memory allocations and improve performance.
 // It uses a sync.Pool to manage the byte slices.
@@ -158,7 +156,7 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 //   - mtu: int - The MTU of the TUN device.
 //   - reconnectDelay: time.Duration - The delay between reconnect attempts.
 func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod time.Duration, initialPacketSize uint16, endpoint *net.UDPAddr, device TunnelDevice, mtu int, reconnectDelay time.Duration) {
-	packetBufferPool = NewNetBuffer(mtu)
+	packetBufferPool := NewNetBuffer(mtu)
 	for {
 		log.Printf("Establishing MASQUE connection to %s:%d", endpoint.IP, endpoint.Port)
 		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
