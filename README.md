@@ -51,7 +51,7 @@ Since the tool is written in Go, it should be rather trivial.
 
 1. Ensure that you have Go installed on your system. You can download it from [here](https://golang.org/dl/). At least Go 1.23.1 is required.
 2. Clone this repository and switch to the project's root directory
-3. Build the p
+3. Build the project using the following command:
 ```shell
 CGO_ENABLED=0 go build -ldflags="-s -w" .
 ```
