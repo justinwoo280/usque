@@ -124,7 +124,23 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
-		dev, err := water.New(water.Config{DeviceType: water.TUN})
+		interfaceName, err := cmd.Flags().GetString("interface-name")
+		if err != nil {
+			cmd.Printf("Failed to get interface name: %v\n", err)
+			return
+		}
+
+		platformSpecificParams := water.PlatformSpecificParams{}
+		if interfaceName != "" {
+			err = internal.CheckIfname(interfaceName)
+			if err != nil {
+				log.Printf("Invalid interface name: %v", err)
+				return
+			}
+			platformSpecificParams.Name = interfaceName
+		}
+
+		dev, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: platformSpecificParams})
 		if err != nil {
 			log.Println("Are you root/administrator? TUN device creation usually requires elevated privileges.")
 			log.Fatalf("failed to create TUN device: %v", err)
@@ -188,5 +204,6 @@ func init() {
 	nativeTunCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	nativeTunCmd.Flags().BoolP("no-iproute2", "I", false, "Do not set up IP addresses and do not set the link up")
 	nativeTunCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom inteface name for the TUN interface")
 	rootCmd.AddCommand(nativeTunCmd)
 }

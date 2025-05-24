@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"log"
 	"math/big"
 	"net"
 	"strconv"
@@ -269,4 +270,49 @@ func isValidHostname(hostname string) bool {
 //   - string: The base64-encoded "username:password" string.
 func LoginToBase64(username, password string) string {
 	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+}
+
+// CheckIfname validates a network interface name according to the following rules:
+//   - Must not be empty.
+//   - Should not exceed 15 characters (warning if it does).
+//   - Should not contain non-ASCII characters (warning if it does).
+//   - Should not contain invalid characters: '/', whitespace, or control characters.
+//
+// Parameters:
+//   - name: string - The interface name to validate.
+//
+// Returns:
+//   - error: An error if the name is invalid, or nil if valid.
+func CheckIfname(name string) error {
+	if name == "" {
+		return errors.New("interface name cannot be empty")
+	}
+
+	if len(name) >= 16 {
+		log.Printf("Warning: interface name '%s' is longer than %d characters", name, 16-1)
+	}
+
+	var invalidChar bool
+	var hasWhitespace bool
+
+	for _, r := range name {
+		if r > 127 {
+			invalidChar = true
+			break
+		}
+		if r == '/' || r == ' ' || strings.ContainsRune("\t\n\v\f\r", r) {
+			hasWhitespace = true
+			break
+		}
+	}
+
+	if invalidChar {
+		log.Printf("Warning: interface name contains non-ASCII character")
+	}
+
+	if hasWhitespace {
+		return errors.New("interface name contains invalid character: '/' or whitespace")
+	}
+
+	return nil
 }
