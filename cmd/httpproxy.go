@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -143,6 +144,18 @@ var httpProxyCmd = &cobra.Command{
 			dnsAddrs = append(dnsAddrs, addr)
 		}
 
+		dnsTimeout, err := cmd.Flags().GetDuration("dns-timeout")
+		if err != nil {
+			cmd.Printf("Failed to get DNS timeout: %v\n", err)
+			return
+		}
+
+		localDNS, err := cmd.Flags().GetBool("local-dns")
+		if err != nil {
+			cmd.Printf("Failed to get local-dns flag: %v\n", err)
+			return
+		}
+
 		mtu, err := cmd.Flags().GetInt("mtu")
 		if err != nil {
 			cmd.Printf("Failed to get MTU: %v\n", err)
@@ -179,6 +192,8 @@ var httpProxyCmd = &cobra.Command{
 		}
 		defer tunDev.Close()
 
+		resolver := internal.GetProxyResolver(localDNS, tunNet, dnsAddrs, dnsTimeout)
+
 		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
 
 		server := &http.Server{
@@ -191,9 +206,9 @@ var httpProxyCmd = &cobra.Command{
 				}
 
 				if r.Method == http.MethodConnect {
-					handleHTTPSConnect(w, r, tunNet)
+					handleHTTPSConnect(w, r, tunNet, resolver)
 				} else {
-					handleHTTPProxy(w, r, tunNet)
+					handleHTTPProxy(w, r, tunNet, resolver)
 				}
 			}),
 		}
@@ -218,59 +233,112 @@ func authenticate(r *http.Request, expectedAuth string) bool {
 	return authHeader == expectedAuth
 }
 
-// handleHTTPSConnect processes HTTPS CONNECT proxy requests, establishing a tunnel to the destination.
+// handleHTTPSConnect establishes a tunnel to the destination using the provided resolver.
 //
 // Parameters:
-//   - w: http.ResponseWriter - The HTTP response writer.
-//   - r: *http.Request - The incoming HTTP CONNECT request.
-//   - tunNet: *netstack.Net - The network stack used for dialing the destination.
-func handleHTTPSConnect(w http.ResponseWriter, r *http.Request, tunNet *netstack.Net) {
-	destConn, err := tunNet.DialContext(r.Context(), "tcp", r.Host)
+//   - w: http.ResponseWriter - The response writer for the HTTP request.
+//   - r: *http.Request - The incoming HTTP request.
+//   - tunNet: *netstack.Net - The netstack network interface.
+//   - resolver: *net.Resolver - The DNS resolver to use for the tunnel.
+func handleHTTPSConnect(w http.ResponseWriter, r *http.Request, tunNet *netstack.Net, resolver *net.Resolver) {
+	ctx := r.Context()
+
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		http.Error(w, "Invalid host", http.StatusBadRequest)
+		return
+	}
+
+	var destAddr string
+	if resolver != nil {
+		ips, err := resolver.LookupIP(ctx, "ip", host)
+		if err != nil || len(ips) == 0 {
+			http.Error(w, "DNS resolution failed", http.StatusServiceUnavailable)
+			return
+		}
+		destAddr = net.JoinHostPort(ips[0].String(), port)
+	} else {
+		destAddr = r.Host
+	}
+
+	destConn, err := tunNet.DialContext(ctx, "tcp", destAddr)
 	if err != nil {
 		http.Error(w, "Unable to connect to destination", http.StatusServiceUnavailable)
 		return
 	}
-	defer destConn.Close()
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		destConn.Close()
 		return
 	}
 
 	clientConn, _, err := hj.Hijack()
 	if err != nil {
 		http.Error(w, "Hijacking failed", http.StatusInternalServerError)
+		destConn.Close()
 		return
 	}
-	defer clientConn.Close()
 
-	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	if err != nil {
+		clientConn.Close()
+		destConn.Close()
+		return
+	}
 
-	go io.Copy(destConn, clientConn)
+	go func() {
+		defer destConn.Close()
+		defer clientConn.Close()
+		io.Copy(destConn, clientConn)
+	}()
 	io.Copy(clientConn, destConn)
 }
 
-// handleHTTPProxy forwards HTTP proxy requests to the destination and relays responses back to the client.
+// handleHTTPProxy forwards HTTP proxy requests to the destination and relays responses back to the client using the provided resolver.
 //
 // Parameters:
-//   - w: http.ResponseWriter - The HTTP response writer.
+//   - w: http.ResponseWriter - The response writer for the HTTP request.
 //   - r: *http.Request - The incoming HTTP request.
-//   - tunNet: *netstack.Net - The network stack used for making outbound requests.
-func handleHTTPProxy(w http.ResponseWriter, r *http.Request, tunNet *netstack.Net) {
+//   - tunNet: *netstack.Net - The netstack network interface.
+//   - resolver: *net.Resolver - The DNS resolver to use for the tunnel.
+func handleHTTPProxy(w http.ResponseWriter, r *http.Request, tunNet *netstack.Net, resolver *net.Resolver) {
+	port := r.URL.Port()
+	if port == "" {
+		port = "80"
+	}
+
 	client := &http.Client{
 		Transport: &http.Transport{
-			DialContext: tunNet.DialContext,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid address: %w", err)
+				}
+
+				var dialAddr string
+				if resolver != nil {
+					ips, err := resolver.LookupIP(ctx, "ip", host)
+					if err != nil || len(ips) == 0 {
+						return nil, fmt.Errorf("DNS resolution failed for %s: %w", host, err)
+					}
+					dialAddr = net.JoinHostPort(ips[0].String(), port)
+				} else {
+					dialAddr = addr
+				}
+
+				return tunNet.DialContext(ctx, network, dialAddr)
+			},
 		},
 	}
 
-	req, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), r.Body)
 	if err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
-
-	req.Header = r.Header
+	req.Header = r.Header.Clone()
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -303,7 +371,8 @@ func init() {
 	httpProxyCmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	httpProxyCmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
 	httpProxyCmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
-	httpProxyCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers to use inside the MASQUE tunnel")
+	httpProxyCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers to use")
+	httpProxyCmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")
 	httpProxyCmd.Flags().BoolP("ipv6", "6", false, "Use IPv6 for MASQUE connection")
 	httpProxyCmd.Flags().BoolP("no-tunnel-ipv4", "F", false, "Disable IPv4 inside the MASQUE tunnel")
 	httpProxyCmd.Flags().BoolP("no-tunnel-ipv6", "S", false, "Disable IPv6 inside the MASQUE tunnel")
@@ -312,5 +381,6 @@ func init() {
 	httpProxyCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	httpProxyCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	httpProxyCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	httpProxyCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
 	rootCmd.AddCommand(httpProxyCmd)
 }

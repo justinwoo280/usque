@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"net/netip"
@@ -150,6 +149,12 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
+		localDNS, err := cmd.Flags().GetBool("local-dns")
+		if err != nil {
+			cmd.Printf("Failed to get local-dns flag: %v\n", err)
+			return
+		}
+
 		mtu, err := cmd.Flags().GetInt("mtu")
 		if err != nil {
 			cmd.Printf("Failed to get MTU: %v\n", err)
@@ -183,6 +188,13 @@ var socksCmd = &cobra.Command{
 
 		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
 
+		var resolver socks5.NameResolver
+		if localDNS {
+			resolver = internal.TunnelDNSResolver{TunNet: nil, DNSAddrs: dnsAddrs, Timeout: dnsTimeout}
+		} else {
+			resolver = internal.TunnelDNSResolver{TunNet: tunNet, DNSAddrs: dnsAddrs, Timeout: dnsTimeout}
+		}
+
 		var server *socks5.Server
 		if username == "" || password == "" {
 			server = socks5.NewServer(
@@ -190,7 +202,7 @@ var socksCmd = &cobra.Command{
 				socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return tunNet.DialContext(ctx, network, addr)
 				}),
-				socks5.WithResolver(TunnelDNSResolver{tunNet, dnsAddrs, dnsTimeout}),
+				socks5.WithResolver(resolver),
 			)
 		} else {
 			server = socks5.NewServer(
@@ -198,7 +210,7 @@ var socksCmd = &cobra.Command{
 				socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return tunNet.DialContext(ctx, network, addr)
 				}),
-				socks5.WithResolver(TunnelDNSResolver{tunNet, dnsAddrs, dnsTimeout}),
+				socks5.WithResolver(resolver),
 				socks5.WithAuthMethods(
 					[]socks5.Authenticator{
 						socks5.UserPassAuthenticator{
@@ -219,58 +231,14 @@ var socksCmd = &cobra.Command{
 	},
 }
 
-// TunnelDNSResolver implements a DNS resolver that uses the provided DNS servers inside a MASQUE tunnel.
-type TunnelDNSResolver struct {
-	// tunNet is the network stack for the tunnel you want to use for DNS resolution.
-	tunNet *netstack.Net
-	// dnsAddrs is the list of DNS servers to use for resolution.
-	dnsAddrs []netip.Addr
-	// timeout is the timeout for DNS queries on a specific server before trying the next one.
-	timeout time.Duration
-}
-
-// Resolve performs a DNS lookup using the provided DNS resolvers.
-// It tries each resolver in order until one succeeds.
-//
-// Parameters:
-//   - ctx: context.Context - The context for the DNS lookup.
-//   - name: string - The domain name to resolve.
-//
-// Returns:
-//   - context.Context: The context for the DNS lookup.
-//   - net.IP: The resolved IP address.
-//   - error: An error if the lookup fails.
-func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
-	var lastErr error
-
-	for _, dnsAddr := range r.dnsAddrs {
-		dnsHost := net.JoinHostPort(dnsAddr.String(), "53")
-
-		resolver := &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				return r.tunNet.DialContext(ctx, "udp", dnsHost)
-			},
-		}
-
-		ips, err := resolver.LookupIP(ctx, "ip", name)
-		if err == nil && len(ips) > 0 {
-			return ctx, ips[0], nil
-		}
-		lastErr = err
-	}
-
-	return ctx, nil, fmt.Errorf("all DNS servers failed: %v", lastErr)
-}
-
 func init() {
 	socksCmd.Flags().StringP("bind", "b", "0.0.0.0", "Address to bind the SOCKS proxy to")
 	socksCmd.Flags().StringP("port", "p", "1080", "Port to listen on for SOCKS proxy")
 	socksCmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	socksCmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
 	socksCmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
-	socksCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers to use inside the MASQUE tunnel")
-	socksCmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries on a specific server (tries the next server if exceeded)")
+	socksCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers to use")
+	socksCmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")
 	socksCmd.Flags().BoolP("ipv6", "6", false, "Use IPv6 for MASQUE connection")
 	socksCmd.Flags().BoolP("no-tunnel-ipv4", "F", false, "Disable IPv4 inside the MASQUE tunnel")
 	socksCmd.Flags().BoolP("no-tunnel-ipv6", "S", false, "Disable IPv6 inside the MASQUE tunnel")
@@ -279,5 +247,6 @@ func init() {
 	socksCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	socksCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
 	rootCmd.AddCommand(socksCmd)
 }
