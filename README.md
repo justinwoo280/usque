@@ -15,7 +15,11 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
   - [Usage](#usage)
     - [Registration](#registration)
     - [Enrolling](#enrolling)
-    - [Native Tunnel Mode (for Advanced Users, Linux only!)](#native-tunnel-mode-for-advanced-users-linux-only)
+    - [Native Tunnel Mode (for Advanced Users, Linux and Windows only!)](#native-tunnel-mode-for-advanced-users-linux-and-windows-only)
+      - [On Linux](#on-linux)
+      - [On Windows](#on-windows)
+      - [Routes on Linux](#routes-on-linux)
+      - [Routes on Windows](#routes-on-windows)
     - [SOCKS5 Proxy Mode (easy, cross-platform)](#socks5-proxy-mode-easy-cross-platform)
     - [HTTP Proxy Mode (easy, cross-platform)](#http-proxy-mode-easy-cross-platform)
     - [Port Forwarding Mode (for Advanced Users, cross-platform)](#port-forwarding-mode-for-advanced-users-cross-platform)
@@ -139,9 +143,17 @@ While the registration command also handles device enrollment, in some cases, yo
 $ ./usque enroll
 ```
 
-### Native Tunnel Mode (for Advanced Users, Linux only!)
+### Native Tunnel Mode (for Advanced Users, Linux and Windows only!)
 
-The native tunnel is probably the most **efficient** mode of operation *(as of now)*. It **requires the `TUN` device** to be available on the system. Which means you will need a kernel that supports loading `tun.ko`. **`iproute2` is also a requirement**. The native tunnel mode is currently **only supported on Linux**. While it is still userspace, traffic is directly injected into the kernel's network stack, therefore you will see a real network interface and you will be able to tunnel any IP (Layer 3) traffic that WARP supports. Since it creates a real network interface and also attempts to set IP addresses, **it will most likely require root privileges**.
+The native tunnel is probably the most **efficient** mode of operation *(as of now)*. 
+
+#### On Linux
+
+It **requires the `TUN` device** to be available on the system. This means your kernel must support loading the `tun.ko` module. **`iproute2` is also a requirement**. While it is still userspace, traffic is directly injected into the kernel's network stack, therefore you will see a real network interface and you will be able to tunnel any IP (Layer 3) traffic that WARP supports. Since it creates a real network interface and also attempts to set IP addresses, **it will most likely require root privileges**.
+
+#### On Windows
+
+It requires the [wintun.dll](https://www.wintun.net/) file to be present in the same directory as the `usque.exe` binary. Then it will take care of bringing up the interface and setting the IP addresses. Normally this also requires administrative privileges.
 
 To bring up a native tunnel, execute:
 
@@ -149,7 +161,7 @@ To bring up a native tunnel, execute:
 $ sudo ./usque nativetun
 ```
 
-You should see a `tun0` (or tun1, tun2, etc.) interface appear. If you didn't disable IPv4 and IPv6 inside the tunnel using cli flags, you should also see the IPv4 and IPv6 address pre-assigned to this interface. This should be enough for applications that can route traffic through a specific network interface to function. For example `ping`:
+Unless otherwise specified, you should see a `tun0` (or `tun1`, `tun2`, etc.) interface appear on Linux. On Windows, the interface is typically named `usque`. If you didn't disable IPv4 and IPv6 inside the tunnel using cli flags (on Linux), you should also see the IPv4 and IPv6 address pre-assigned to this interface. This should be enough for applications that can route traffic through a specific network interface to function. For example `ping`:
 
 ```shell
 $ ping -I tun0 1.1
@@ -161,11 +173,7 @@ Or `curl`:
 $ curl --interface tun0 https://cloudflare.com/cdn-cgi/trace
 ```
 
-Should just work. However **the tool doesn't set any routes**. If you need that, you have to do that manually. For example, to route all traffic to the tunnel, you need to make sure that the address used for tunnel communication is routed to your regular network interface. For that, open the `config.json` and check the endpoint address. If you plan to connect to the Cloudflare endpoint using IPv4, you will most likely see this:
-
-```json
-"endpoint_v4": "162.159.198.1"
-```
+#### Routes on Linux
 
 Assuming your regular network interface is `eth0` and your gateway address is `192.168.1.1`, you can add a route like this:
 
@@ -179,8 +187,50 @@ After that, you can add a default route to the `tun0` interface for both IPv4 an
 $ sudo ip route add default dev tun0 && sudo ip -6 route add default dev tun0
 ```
 
+#### Routes on Windows
+
+First, determine the interface index for your regular network adapter by running:
+
+```cmd
+route print
+```
+
+Look under the **Interface List** for the correct index number.
+
+Before adding default routes, determine the gateway for your tunnel interface by running:
+
+```cmd
+ipconfig
+```
+
+Look for the adapter named `usque` (or whatever name you have for your tunnel interface) and note its gateway address.
+
+Assuming:
+
+* Tunnel endpoint: `162.159.198.1`
+* Gateway: `192.168.1.1`
+* Interface index: `12`
+* Tunnel interface: `usque` (replace with the actual name or index of your tunnel interface)
+
+Run the following commands in an **elevated Command Prompt** (Run as Administrator):
+
+```cmd
+route add 162.159.198.1 mask 255.255.255.255 192.168.1.1 metric 1 if 12
+```
+
+Then add default routes to route all traffic through the tunnel:
+
+```cmd
+route add 0.0.0.0 mask 0.0.0.0 [TUNNEL_GATEWAY] metric 1 if [TUN_INTERFACE_INDEX]
+route add ::/0 [TUNNEL_GATEWAY] metric 1 if [TUN_INTERFACE_INDEX]
+```
+
+> [!NOTE]
+> Replace `[TUNNEL_GATEWAY]` and `[TUN_INTERFACE_INDEX]` with the actual values for your tunnel adapter. You can get these by checking `ipconfig` and `route print`.
+
 > [!CAUTION]
-> Always be careful with default routes, especially if you are running this on a headless machine. It is very easy to close yourself out of your current session. I suggest [network namespaces](https://man7.org/linux/man-pages/man7/network_namespaces.7.html) as a safer playground for experiments or a spare VM with physical access or serial console.
+> Always be careful with default routes, especially if you are running this on a headless machine. It is very easy to close yourself out of your current session. I suggest [network namespaces](https://man7.org/linux/man-pages/man7/network_namespaces.7.html) on Linux as a safer playground for experiments or a spare VM with physical access or serial console.
+> On Windows, you can set specific routes first such as `8.8.8.8/32` to ensure the tunnel works before adding a default route.
 
 ### SOCKS5 Proxy Mode (easy, cross-platform)
 
@@ -210,7 +260,7 @@ curl -x socks5://myuser:mypass@localhost:8080 https://cloudflare.com/cdn-cgi/tra
 > Since the proxy emulates its own networking stack, it's generally safe to say that users won't be able to access internal IPs and services the host has access to using the proxy. However the internal WARP network is available for them unfiltered. If you have ZeroTrust and Gateway on, users of your proxy may be able to reach each other as no manual filtering is applied. **Inside the tunnel they will be able to connect to any TCP or UDP service**.
 
 > [!CAUTION]
-> Local SOCKS5 **traffic is not encrypted** since SOCKS5 does not support encryption. You probably shouldn't transport statewide secrets from one device to another on a public WiFi from one device to another that has `usque` running.
+> Local SOCKS5 **traffic is not encrypted** since SOCKS5 does not support encryption. You probably shouldn't transport statewide secrets from one device to another on a public WiFi that has `usque` running.
 
 > [!NOTE]
 > For now only one `user:pass` is supported.
@@ -243,7 +293,7 @@ curl -x http://myuser:mypass@localhost:8080 https://cloudflare.com/cdn-cgi/trace
 > Since the proxy emulates its own networking stack, it's generally safe to say that users won't be able to access internal IPs and services the host has access to using the proxy. However the internal WARP network is available for them unfiltered. If you have ZeroTrust and Gateway on, users of your proxy may be able to reach each other as no manual filtering is applied. **Inside the tunnel they will be able to connect to any TCP service.**
 
 > [!CAUTION]
-> Local HTTP **traffic is not encrypted** since HTTP does not support encryption, and HTTPS isn't implemented. It should be trivial to add, but I didn't need it yet. You probably shouldn't transport statewide secrets from one device to another on a public WiFi from one device to another that has `usque` running.
+> Local HTTP **traffic is not encrypted** since HTTP does not support encryption, and HTTPS isn't implemented. It should be trivial to add, but I didn't need it yet. You probably shouldn't transport statewide secrets from one device to another on a public WiFi that has `usque` running.
 
 > [!NOTE]
 > For now only one `user:pass` is supported.
