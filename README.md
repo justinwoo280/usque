@@ -173,6 +173,14 @@ Or `curl`:
 $ curl --interface tun0 https://cloudflare.com/cdn-cgi/trace
 ```
 
+Should just work. However **the tool doesn't set any routes**. If you need that, you have to do that manually. For example, to route all traffic to the tunnel, you need to make sure that the address used for tunnel communication is routed to your regular network interface. For that, open the `config.json` and check the endpoint address. If you plan to connect to the Cloudflare endpoint using IPv4, you will most likely see this:
+
+```json
+"endpoint_v4": "162.159.198.1"
+```
+
+Remember that for the next steps.
+
 #### Routes on Linux
 
 Assuming your regular network interface is `eth0` and your gateway address is `192.168.1.1`, you can add a route like this:
