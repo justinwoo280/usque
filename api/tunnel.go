@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"sync"
 	"time"
 
+	connectip "github.com/Diniboy1123/connect-ip-go"
 	"github.com/Diniboy1123/usque/internal"
 	"github.com/songgao/water"
 	"golang.zx2c4.com/wireguard/tun"
@@ -199,15 +201,22 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
 					packetBufferPool.Put(buf)
-					errChan <- fmt.Errorf("failed to write to IP connection: %v", err)
-					return
+					if errors.As(err, new(*connectip.CloseError)) {
+						errChan <- fmt.Errorf("connection closed while writing to IP connection: %v", err)
+						return
+					}
+					log.Printf("Error writing to IP connection: %v, continuing...", err)
+					continue
 				}
 				packetBufferPool.Put(buf)
 
 				if len(icmp) > 0 {
 					if err := device.WritePacket(icmp); err != nil {
-						errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
-						return
+						if errors.As(err, new(*connectip.CloseError)) {
+							errChan <- fmt.Errorf("connection closed while writing ICMP to TUN device: %v", err)
+							return
+						}
+						log.Printf("Error writing ICMP to TUN device: %v, continuing...", err)
 					}
 				}
 			}
@@ -219,8 +228,12 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 			for {
 				n, err := ipConn.ReadPacket(buf, true)
 				if err != nil {
-					errChan <- fmt.Errorf("failed to read from IP connection: %v", err)
-					return
+					if errors.As(err, new(*connectip.CloseError)) {
+						errChan <- fmt.Errorf("connection closed while reading from IP connection: %v", err)
+						return
+					}
+					log.Printf("Error reading from IP connection: %v, continuing...", err)
+					continue
 				}
 				if err := device.WritePacket(buf[:n]); err != nil {
 					errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
