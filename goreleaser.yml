@@ -20,17 +20,63 @@ builds:
       - "-X github.com/Diniboy1123/usque/cmd.commit={{.Commit}}"
       - "-X github.com/Diniboy1123/usque/cmd.date={{.Date}}"
   
-  - id: linux
+  - id: linux-amd64
     goos:
       - linux
     goarch:
       - amd64
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - "-s -w"
+      - "-X github.com/Diniboy1123/usque/cmd.version={{.Tag}}"
+      - "-X github.com/Diniboy1123/usque/cmd.commit={{.Commit}}"
+      - "-X github.com/Diniboy1123/usque/cmd.date={{.Date}}"
+
+  - id: linux-arm
+    goos:
+      - linux
+    goarch:
       - arm
-      - arm64
     goarm:
       - 5
       - 6
       - 7
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - "-s -w"
+      - "-X github.com/Diniboy1123/usque/cmd.version={{.Tag}}"
+      - "-X github.com/Diniboy1123/usque/cmd.commit={{.Commit}}"
+      - "-X github.com/Diniboy1123/usque/cmd.date={{.Date}}"
+
+  - id: linux-arm64
+    goos:
+      - linux
+    goarch:
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - "-s -w"
+      - "-X github.com/Diniboy1123/usque/cmd.version={{.Tag}}"
+      - "-X github.com/Diniboy1123/usque/cmd.commit={{.Commit}}"
+      - "-X github.com/Diniboy1123/usque/cmd.date={{.Date}}"
+
+  - id: linux-mips
+    goos:
+      - linux
+    goarch:
+      - mips
+      - mipsle
+      - mips64
+      - mips64le
     env:
       - CGO_ENABLED=0
     flags:
