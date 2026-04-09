@@ -97,6 +97,8 @@ var registerCmd = &cobra.Command{
 			EndpointV4: updatedAccountData.Config.Peers[0].Endpoint.V4[:len(updatedAccountData.Config.Peers[0].Endpoint.V4)-2],
 			// strip [ from beginning and ]:0 from end
 			EndpointV6:     updatedAccountData.Config.Peers[0].Endpoint.V6[1 : len(updatedAccountData.Config.Peers[0].Endpoint.V6)-3],
+			EndpointH2V4:   config.DefaultEndpointH2V4,
+			EndpointH2V6:   config.DefaultEndpointH2V6,
 			EndpointPubKey: updatedAccountData.Config.Peers[0].PublicKey,
 			License:        updatedAccountData.Account.License,
 			ID:             updatedAccountData.ID,

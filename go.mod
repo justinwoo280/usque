@@ -3,13 +3,14 @@ module github.com/Diniboy1123/usque
 go 1.25.5
 
 require (
-	github.com/Diniboy1123/connect-ip-go v0.0.0-20251011145655-7be32d5976d9
+	github.com/Diniboy1123/connect-ip-go v0.0.0-20260409225322-8d7bb0a858a2
 	github.com/quic-go/quic-go v0.59.0
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/spf13/cobra v1.10.2
 	github.com/things-go/go-socks5 v0.1.1
 	github.com/vishvananda/netlink v1.3.1
 	github.com/yosida95/uritemplate/v3 v3.0.2
+	golang.org/x/net v0.52.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 )
 
@@ -23,7 +24,6 @@ require (
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 // indirect
-	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.15.0 // indirect

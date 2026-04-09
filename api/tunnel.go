@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -148,11 +149,12 @@ type MaintainTunnelConfig struct {
 	TLSConfig         *tls.Config
 	KeepalivePeriod   time.Duration
 	InitialPacketSize uint16
-	Endpoint          *net.UDPAddr
+	Endpoint          net.Addr
 	Device            TunnelDevice
 	MTU               int
 	ReconnectDelay    time.Duration
 	AlwaysReconnect   bool
+	UseHTTP2          bool
 }
 
 // MaintainTunnel continuously connects to the MASQUE server, then starts two
@@ -164,6 +166,16 @@ type MaintainTunnelConfig struct {
 //   - ctx: context.Context - The context for the connection.
 //   - cfg: MaintainTunnelConfig - Tunnel maintenance runtime configuration.
 func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+	if cfg.UseHTTP2 {
+		if _, ok := cfg.Endpoint.(*net.TCPAddr); !ok {
+			log.Fatalf("MaintainTunnel: HTTP/2 mode requires a *net.TCPAddr endpoint, got %T", cfg.Endpoint)
+		}
+	} else {
+		if _, ok := cfg.Endpoint.(*net.UDPAddr); !ok {
+			log.Fatalf("MaintainTunnel: HTTP/3 mode requires a *net.UDPAddr endpoint, got %T", cfg.Endpoint)
+		}
+	}
+
 	packetBufferPool := NewNetBuffer(cfg.MTU)
 
 	for {
@@ -181,13 +193,14 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", n)
 		}
 
-		log.Printf("Establishing MASQUE connection to %s:%d", cfg.Endpoint.IP, cfg.Endpoint.Port)
+		log.Printf("Establishing MASQUE connection to %s", cfg.Endpoint)
 		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
 			ctx,
 			cfg.TLSConfig,
 			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize),
 			internal.ConnectURI,
 			cfg.Endpoint,
+			cfg.UseHTTP2,
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
@@ -217,14 +230,14 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				n, err := cfg.Device.ReadPacket(buf)
 				if err != nil {
 					packetBufferPool.Put(buf)
-					errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
+					errChan <- fmt.Errorf("failed to read from TUN device: %w", err)
 					return
 				}
 				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
 					packetBufferPool.Put(buf)
 					if errors.As(err, new(*connectip.CloseError)) {
-						errChan <- fmt.Errorf("connection closed while writing to IP connection: %v", err)
+						errChan <- fmt.Errorf("connection closed while writing to IP connection: %w", err)
 						return
 					}
 					log.Printf("Error writing to IP connection: %v, continuing...", err)
@@ -235,7 +248,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				if len(icmp) > 0 {
 					if err := cfg.Device.WritePacket(icmp); err != nil {
 						if errors.As(err, new(*connectip.CloseError)) {
-							errChan <- fmt.Errorf("connection closed while writing ICMP to TUN device: %v", err)
+							errChan <- fmt.Errorf("connection closed while writing ICMP to TUN device: %w", err)
 							return
 						}
 						log.Printf("Error writing ICMP to TUN device: %v, continuing...", err)
@@ -250,15 +263,19 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			for {
 				n, err := ipConn.ReadPacket(buf, true)
 				if err != nil {
+					if errors.Is(err, io.EOF) {
+						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
+						return
+					}
 					if errors.As(err, new(*connectip.CloseError)) {
-						errChan <- fmt.Errorf("connection closed while reading from IP connection: %v", err)
+						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
 						return
 					}
 					log.Printf("Error reading from IP connection: %v, continuing...", err)
 					continue
 				}
 				if err := cfg.Device.WritePacket(buf[:n]); err != nil {
-					errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
+					errChan <- fmt.Errorf("failed to write to TUN device: %w", err)
 					return
 				}
 			}

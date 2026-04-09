@@ -7,7 +7,6 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
 ## Table of Contents
 
 - [usque](#usque)
-          - [🥚➡️🍏🍎](#️)
   - [Table of Contents](#table-of-contents)
   - [Installation](#installation)
   - [Building from source](#building-from-source)
@@ -23,6 +22,8 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
     - [SOCKS5 Proxy Mode (easy, cross-platform)](#socks5-proxy-mode-easy-cross-platform)
     - [HTTP Proxy Mode (easy, cross-platform)](#http-proxy-mode-easy-cross-platform)
     - [Port Forwarding Mode (for Advanced Users, cross-platform)](#port-forwarding-mode-for-advanced-users-cross-platform)
+    - [TCP and HTTP/2 Support](#tcp-and-http2-support)
+      - [HTTP/2 Configuration](#http2-configuration)
     - [Configuration](#configuration)
       - [Fields](#fields)
   - [ZeroTrust support](#zerotrust-support)
@@ -38,6 +39,7 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
     - [Why would you still switch?](#why-would-you-still-switch)
   - [Protocol \& research details](#protocol--research-details)
   - [Why was this built?](#why-was-this-built)
+  - [Why did you fork connect-ip-go?](#why-did-you-fork-connect-ip-go)
   - [Why the name?](#why-the-name)
   - [Contributing](#contributing)
   - [Acknowledgements](#acknowledgements)
@@ -335,6 +337,26 @@ $ ./usque portfw -R 100.96.0.3:8080:localhost:8080 -L localhost:8081:100.96.0.2:
 > [!TIP]
 > Any number of ports are supported. You can chain many ports together if you specify the flag and the corresponding argument one after another.
 
+### TCP and HTTP/2 Support
+
+While `usque` was originally designed with a focus on **QUIC** and **HTTP/3**, Cloudflare has since introduced TCP fallback support in their official clients. `usque` now supports this connection method via `--http2`.
+
+For full details and troubleshooting, see the wiki page: [HTTP/2 support](https://github.com/Diniboy1123/usque/wiki/HTTP-2-support).
+
+#### HTTP/2 Configuration
+
+To connect via TCP/HTTP/2, use the `--http2` CLI flag.
+
+Because endpoints cannot be reliably pulled from the API, you can manage HTTP/2 connections with:
+
+- `endpoint_h2_v4`: IPv4 address for HTTP/2 mode.
+- `endpoint_h2_v6`: IPv6 address for HTTP/2 mode.
+
+Default behavior:
+
+- If `endpoint_h2_v4` is not set, `usque` uses `162.159.198.2`.
+- `endpoint_h2_v6` is intentionally empty by default and must be configured manually when you want HTTP/2 over IPv6.
+
 ### Configuration
 
 For simplicity, the tool uses a JSON configuration file. The default file is `config.json` in the current directory. You can specify a different file using the `-c` flag. This will be respected by all subcommands. Without a configuration file only the `register` subcommand will work.
@@ -346,6 +368,8 @@ Example config:
   "private_key": "M...redacted...==",
   "endpoint_v4": "162.159.198.1",
   "endpoint_v6": "2606:4700:103::",
+  "endpoint_h2_v4": "162.159.198.2",
+  "endpoint_h2_v6": "",
   "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG\n7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w==\n-----END PUBLIC KEY-----\n",
   "license": "A...redacted...Z",
   "id": "00000000-0000-0000-0000-000000000000",
@@ -360,6 +384,8 @@ Example config:
 - `private_key`: Base64 encoded ECDSA private key on the NIST P-256 curve in ASN.1 DER format. **Confidential.** This is used for device authentication.
 - `endpoint_v4`: IPv4 address of the Cloudflare WARP endpoint. **Public.** Used for connecting to the WARP network.
 - `endpoint_v6`: IPv6 address of the Cloudflare WARP endpoint. **Public.** Used for connecting to the WARP network.
+- `endpoint_h2_v4`: IPv4 address used by `--http2`. Defaults to `162.159.198.2` when empty. **Public.**
+- `endpoint_h2_v6`: IPv6 address used by `--http2`. Empty by default and must be set manually for HTTP/2 over IPv6. **Public.**
 - `endpoint_pub_key`: Base64 encoded ECDSA public key on the NIST P-256 curve in PEM format. **Public.** This is used to ensure that we are indeed talking to the Cloudflare WARP endpoint and not being [MiTM](https://en.wikipedia.org/wiki/Man-in-the-middle_attack)'d.
 - `license`: License returned by the server for our account. **Confidential.** With this, you can pair multiple devices to the same account.
 - `id`: Device ID given by the server to us. **Public.** This is used for device identification and API calls.
@@ -460,7 +486,7 @@ At the end of the day, if you are happy with WireGuard, I don't see a reason to 
 
 ## Protocol & research details
 
-This document would be large and too horrific for the average reader if I included all the details about the protocol and the research I did. If you are one of the few people who would be interested in some details, please refer to the [RESEARCH.md](RESEARCH.md) file. That one summarizes the research I did and the protocol details I found in a blog post like format. In the future I plan to write a clear and concise protocol document as well that will be linked here.
+This document would be large and too horrific for the average reader if I included all the details about the protocol and the research I did. If you are one of the few people who would be interested in some details, please refer to the [RESEARCH.md](RESEARCH.md) file. That one summarizes the research I did and the protocol details I found in a blog post like format. In the future I plan to write a clear and concise protocol document as well that will be linked here. Currently only the HTTP/3 is included there.
 
 ## Why was this built?
 

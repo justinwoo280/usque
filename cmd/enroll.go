@@ -112,6 +112,11 @@ var enrollCmd = &cobra.Command{
 
 		log.Printf("Successful registration. Saving config...")
 
+		h2v4 := config.AppConfig.EndpointH2V4
+		if h2v4 == "" {
+			h2v4 = config.DefaultEndpointH2V4
+		}
+
 		config.AppConfig = config.Config{
 			PrivateKey: base64.StdEncoding.EncodeToString(privKeyBytes),
 			// TODO: proper endpoint parsing in utils
@@ -119,6 +124,8 @@ var enrollCmd = &cobra.Command{
 			EndpointV4: updatedAccountData.Config.Peers[0].Endpoint.V4[:len(updatedAccountData.Config.Peers[0].Endpoint.V4)-2],
 			// strip [ from beginning and ]:0 from end
 			EndpointV6:     updatedAccountData.Config.Peers[0].Endpoint.V6[1 : len(updatedAccountData.Config.Peers[0].Endpoint.V6)-3],
+			EndpointH2V4:   h2v4,
+			EndpointH2V6:   config.AppConfig.EndpointH2V6,
 			EndpointPubKey: updatedAccountData.Config.Peers[0].PublicKey,
 			License:        updatedAccountData.Account.License,
 			ID:             updatedAccountData.ID,

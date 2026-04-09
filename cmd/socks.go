@@ -49,7 +49,13 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
-		tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni)
+		insecure, err := cmd.Flags().GetBool("insecure")
+		if err != nil {
+			cmd.Printf("Failed to get insecure flag: %v\n", err)
+			return
+		}
+
+		tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni, insecure)
 		if err != nil {
 			cmd.Printf("Failed to prepare TLS config: %v\n", err)
 			return
@@ -84,17 +90,30 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
-		var endpoint *net.UDPAddr
-		if ipv6, err := cmd.Flags().GetBool("ipv6"); err == nil && !ipv6 {
-			endpoint = &net.UDPAddr{
-				IP:   net.ParseIP(config.AppConfig.EndpointV4),
-				Port: connectPort,
-			}
-		} else {
-			endpoint = &net.UDPAddr{
-				IP:   net.ParseIP(config.AppConfig.EndpointV6),
-				Port: connectPort,
-			}
+		useHTTP2, err := cmd.Flags().GetBool("http2")
+		if err != nil {
+			cmd.Printf("Failed to get HTTP/2 flag: %v\n", err)
+			return
+		}
+
+		useIPv6, err := cmd.Flags().GetBool("ipv6")
+		if err != nil {
+			cmd.Printf("Failed to get ipv6 flag: %v\n", err)
+			return
+		}
+
+		endpoint, err := config.SelectEndpointFromConfig(useHTTP2, useIPv6, connectPort)
+		if err != nil {
+			cmd.Printf("Failed to select endpoint: %v\n", err)
+			return
+		}
+
+		if insecure {
+			config.WarnInsecure()
+		}
+
+		if useHTTP2 {
+			config.LogHTTP2Endpoint(endpoint)
 		}
 
 		tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
@@ -201,6 +220,7 @@ var socksCmd = &cobra.Command{
 			MTU:               mtu,
 			ReconnectDelay:    reconnectDelay,
 			AlwaysReconnect:   alwaysReconnect,
+			UseHTTP2:          useHTTP2,
 		})
 
 		var resolver socks5.NameResolver
@@ -263,6 +283,8 @@ func init() {
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 0, "Custom initial packet size for MASQUE connection (default: auto with PMTU discovery)")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
 	socksCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
+	socksCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
+	socksCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
 	socksCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
 	rootCmd.AddCommand(socksCmd)
 }
