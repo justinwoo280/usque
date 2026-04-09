@@ -143,6 +143,18 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 	return &WaterAdapter{iface: iface}
 }
 
+// MaintainTunnelConfig contains runtime settings for tunnel maintenance.
+type MaintainTunnelConfig struct {
+	TLSConfig         *tls.Config
+	KeepalivePeriod   time.Duration
+	InitialPacketSize uint16
+	Endpoint          *net.UDPAddr
+	Device            TunnelDevice
+	MTU               int
+	ReconnectDelay    time.Duration
+	AlwaysReconnect   bool
+}
+
 // MaintainTunnel continuously connects to the MASQUE server, then starts two
 // forwarding goroutines: one forwarding from the device to the IP connection (and handling
 // any ICMP reply), and the other forwarding from the IP connection to the device.
@@ -150,27 +162,36 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 //
 // Parameters:
 //   - ctx: context.Context - The context for the connection.
-//   - tlsConfig: *tls.Config - The TLS configuration for secure communication.
-//   - keepalivePeriod: time.Duration - The keepalive period for the QUIC connection.
-//   - initialPacketSize: uint16 - The initial packet size for the QUIC connection.
-//   - endpoint: *net.UDPAddr - The UDP address of the MASQUE server.
-//   - device: TunnelDevice - The TUN device to forward packets to and from.
-//   - mtu: int - The MTU of the TUN device.
-//   - reconnectDelay: time.Duration - The delay between reconnect attempts.
-func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod time.Duration, initialPacketSize uint16, endpoint *net.UDPAddr, device TunnelDevice, mtu int, reconnectDelay time.Duration) {
-	packetBufferPool := NewNetBuffer(mtu)
+//   - cfg: MaintainTunnelConfig - Tunnel maintenance runtime configuration.
+func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
+	packetBufferPool := NewNetBuffer(cfg.MTU)
+
 	for {
-		log.Printf("Establishing MASQUE connection to %s:%d", endpoint.IP, endpoint.Port)
+		if !cfg.AlwaysReconnect {
+			log.Println("Tunnel idle. Waiting for outbound activity before reconnecting...")
+			buf := packetBufferPool.Get()
+			n, err := cfg.Device.ReadPacket(buf)
+			if err != nil {
+				packetBufferPool.Put(buf)
+				log.Printf("Failed to read from TUN device while waiting for activity: %v", err)
+				time.Sleep(cfg.ReconnectDelay)
+				continue
+			}
+			packetBufferPool.Put(buf)
+			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", n)
+		}
+
+		log.Printf("Establishing MASQUE connection to %s:%d", cfg.Endpoint.IP, cfg.Endpoint.Port)
 		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
 			ctx,
-			tlsConfig,
-			internal.DefaultQuicConfig(keepalivePeriod, initialPacketSize),
+			cfg.TLSConfig,
+			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize),
 			internal.ConnectURI,
-			endpoint,
+			cfg.Endpoint,
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
-			time.Sleep(reconnectDelay)
+			time.Sleep(cfg.ReconnectDelay)
 			continue
 		}
 		if rsp.StatusCode != 200 {
@@ -182,17 +203,18 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 			if tr != nil {
 				tr.Close()
 			}
-			time.Sleep(reconnectDelay)
+			time.Sleep(cfg.ReconnectDelay)
 			continue
 		}
 
 		log.Println("Connected to MASQUE server")
+
 		errChan := make(chan error, 2)
 
 		go func() {
 			for {
 				buf := packetBufferPool.Get()
-				n, err := device.ReadPacket(buf)
+				n, err := cfg.Device.ReadPacket(buf)
 				if err != nil {
 					packetBufferPool.Put(buf)
 					errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
@@ -211,7 +233,7 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 				packetBufferPool.Put(buf)
 
 				if len(icmp) > 0 {
-					if err := device.WritePacket(icmp); err != nil {
+					if err := cfg.Device.WritePacket(icmp); err != nil {
 						if errors.As(err, new(*connectip.CloseError)) {
 							errChan <- fmt.Errorf("connection closed while writing ICMP to TUN device: %v", err)
 							return
@@ -235,7 +257,7 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 					log.Printf("Error reading from IP connection: %v, continuing...", err)
 					continue
 				}
-				if err := device.WritePacket(buf[:n]); err != nil {
+				if err := cfg.Device.WritePacket(buf[:n]); err != nil {
 					errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
 					return
 				}
@@ -251,6 +273,6 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 		if tr != nil {
 			tr.Close()
 		}
-		time.Sleep(reconnectDelay)
+		time.Sleep(cfg.ReconnectDelay)
 	}
 }

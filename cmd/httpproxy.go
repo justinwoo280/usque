@@ -180,6 +180,12 @@ var httpProxyCmd = &cobra.Command{
 			return
 		}
 
+		alwaysReconnect, err := cmd.Flags().GetBool("always-reconnect")
+		if err != nil {
+			cmd.Printf("Failed to get always-reconnect flag: %v\n", err)
+			return
+		}
+
 		var authHeader string
 		if username != "" && password != "" {
 			authHeader = "Basic " + internal.LoginToBase64(username, password)
@@ -194,7 +200,16 @@ var httpProxyCmd = &cobra.Command{
 
 		resolver := internal.GetProxyResolver(localDNS, tunNet, dnsAddrs, dnsTimeout)
 
-		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
+		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
+			TLSConfig:         tlsConfig,
+			KeepalivePeriod:   keepalivePeriod,
+			InitialPacketSize: initialPacketSize,
+			Endpoint:          endpoint,
+			Device:            api.NewNetstackAdapter(tunDev),
+			MTU:               mtu,
+			ReconnectDelay:    reconnectDelay,
+			AlwaysReconnect:   alwaysReconnect,
+		})
 
 		server := &http.Server{
 			Addr: net.JoinHostPort(bindAddress, port),
@@ -381,6 +396,7 @@ func init() {
 	httpProxyCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	httpProxyCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	httpProxyCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	httpProxyCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
 	httpProxyCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
 	rootCmd.AddCommand(httpProxyCmd)
 }

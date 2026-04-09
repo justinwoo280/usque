@@ -179,6 +179,12 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
+		alwaysReconnect, err := cmd.Flags().GetBool("always-reconnect")
+		if err != nil {
+			cmd.Printf("Failed to get always-reconnect flag: %v\n", err)
+			return
+		}
+
 		tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
 		if err != nil {
 			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
@@ -186,7 +192,16 @@ var socksCmd = &cobra.Command{
 		}
 		defer tunDev.Close()
 
-		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
+		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
+			TLSConfig:         tlsConfig,
+			KeepalivePeriod:   keepalivePeriod,
+			InitialPacketSize: initialPacketSize,
+			Endpoint:          endpoint,
+			Device:            api.NewNetstackAdapter(tunDev),
+			MTU:               mtu,
+			ReconnectDelay:    reconnectDelay,
+			AlwaysReconnect:   alwaysReconnect,
+		})
 
 		var resolver socks5.NameResolver
 		if localDNS {
@@ -247,6 +262,7 @@ func init() {
 	socksCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	socksCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
 	socksCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
 	rootCmd.AddCommand(socksCmd)
 }

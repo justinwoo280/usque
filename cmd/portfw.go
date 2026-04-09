@@ -182,6 +182,29 @@ var portFwCmd = &cobra.Command{
 			return
 		}
 
+		alwaysReconnect := true
+		alwaysChanged := cmd.Flags().Changed("always-reconnect")
+		dontAlwaysChanged := cmd.Flags().Changed("dont-always-reconnect")
+		if alwaysChanged && dontAlwaysChanged {
+			cmd.Printf("Use either --always-reconnect or --dont-always-reconnect, not both\n")
+			return
+		}
+		if alwaysChanged {
+			alwaysReconnect, err = cmd.Flags().GetBool("always-reconnect")
+			if err != nil {
+				cmd.Printf("Failed to get always-reconnect flag: %v\n", err)
+				return
+			}
+		}
+		if dontAlwaysChanged {
+			dontAlwaysReconnect, err := cmd.Flags().GetBool("dont-always-reconnect")
+			if err != nil {
+				cmd.Printf("Failed to get dont-always-reconnect flag: %v\n", err)
+				return
+			}
+			alwaysReconnect = !dontAlwaysReconnect
+		}
+
 		tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
 		if err != nil {
 			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
@@ -189,7 +212,16 @@ var portFwCmd = &cobra.Command{
 		}
 		defer tunDev.Close()
 
-		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
+		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
+			TLSConfig:         tlsConfig,
+			KeepalivePeriod:   keepalivePeriod,
+			InitialPacketSize: initialPacketSize,
+			Endpoint:          endpoint,
+			Device:            api.NewNetstackAdapter(tunDev),
+			MTU:               mtu,
+			ReconnectDelay:    reconnectDelay,
+			AlwaysReconnect:   alwaysReconnect,
+		})
 
 		log.Printf("Virtual tunnel created, forwarding ports")
 
@@ -340,5 +372,7 @@ func init() {
 	portFwCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	portFwCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	portFwCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	portFwCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle (default behavior in portfw)")
+	portFwCmd.Flags().Bool("dont-always-reconnect", false, "Disable always reconnect in portfw; reconnect only when new activity arrives")
 	rootCmd.AddCommand(portFwCmd)
 }

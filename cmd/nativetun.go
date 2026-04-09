@@ -122,6 +122,12 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
+		alwaysReconnect, err := cmd.Flags().GetBool("always-reconnect")
+		if err != nil {
+			cmd.Printf("Failed to get always-reconnect flag: %v\n", err)
+			return
+		}
+
 		interfaceName, err := cmd.Flags().GetString("interface-name")
 		if err != nil {
 			cmd.Printf("Failed to get interface name: %v\n", err)
@@ -152,7 +158,16 @@ var nativeTunCmd = &cobra.Command{
 
 		log.Printf("Created TUN device: %s", t.name)
 
-		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, dev, mtu, reconnectDelay)
+		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
+			TLSConfig:         tlsConfig,
+			KeepalivePeriod:   keepalivePeriod,
+			InitialPacketSize: initialPacketSize,
+			Endpoint:          endpoint,
+			Device:            dev,
+			MTU:               mtu,
+			ReconnectDelay:    reconnectDelay,
+			AlwaysReconnect:   alwaysReconnect,
+		})
 
 		log.Println("Tunnel established, you may now set up routing and DNS")
 
@@ -171,6 +186,7 @@ func init() {
 	nativeTunCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	nativeTunCmd.Flags().BoolP("no-iproute2", "I", false, "Linux only: Do not set up IP addresses and do not set the link up")
 	nativeTunCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	nativeTunCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
 	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom inteface name for the TUN interface")
 	rootCmd.AddCommand(nativeTunCmd)
 }
