@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"sync"
@@ -263,7 +262,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			for {
 				n, err := ipConn.ReadPacket(buf, true)
 				if err != nil {
-					if errors.Is(err, io.EOF) {
+					if cfg.UseHTTP2 {
 						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
 						return
 					}
