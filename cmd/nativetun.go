@@ -17,6 +17,7 @@ type tunDevice struct {
 	iproute2 bool
 	ipv4     bool
 	ipv6     bool
+	persist  bool
 }
 
 var nativeTunCmd = &cobra.Command{
@@ -160,12 +161,19 @@ var nativeTunCmd = &cobra.Command{
 			}
 		}
 
+		persist, err := cmd.Flags().GetBool("persist")
+		if err != nil {
+			cmd.Printf("Failed to get persist flag: %v\n", err)
+			return
+		}
+
 		t := &tunDevice{
 			name:     interfaceName,
 			mtu:      mtu,
 			iproute2: !setIproute2,
 			ipv4:     !tunnelIPv4,
 			ipv6:     !tunnelIPv6,
+			persist:  persist,
 		}
 
 		dev, err := t.create()
@@ -208,6 +216,7 @@ func init() {
 	nativeTunCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
 	nativeTunCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
 	nativeTunCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
-	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom inteface name for the TUN interface")
+	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom interface name for the TUN interface")
+	nativeTunCmd.Flags().Bool("persist", false, "Linux only: Keep the TUN interface after exit")
 	rootCmd.AddCommand(nativeTunCmd)
 }
