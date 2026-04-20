@@ -103,10 +103,17 @@ var enrollCmd = &cobra.Command{
 						log.Fatalf("Failed to enroll key: %v", err)
 					}
 				} else {
-					log.Fatalf("Enrollment aborted by user. API errors: %s", apiErr.ErrorsAsString("; "))
+					if apiErr != nil {
+						log.Fatalf("Enrollment aborted by user. API errors: %s", apiErr.ErrorsAsString("; "))
+					}
+					log.Fatal("Enrollment aborted by user.")
 				}
 			} else {
-				log.Fatalf("Failed to enroll key: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
+				// apiErr is nil on transport errors etc. (#86).
+				if apiErr != nil {
+					log.Fatalf("Failed to enroll key: %v (API errors: %s)", err, apiErr.ErrorsAsString("; "))
+				}
+				log.Fatalf("Failed to enroll key: %v", err)
 			}
 		}
 
