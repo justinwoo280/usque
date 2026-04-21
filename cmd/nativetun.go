@@ -167,6 +167,18 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
+		onConnect, err := cmd.Flags().GetString("on-connect")
+		if err != nil {
+			cmd.Printf("Failed to get on-connect flag: %v\n", err)
+			return
+		}
+
+		onDisconnect, err := cmd.Flags().GetString("on-disconnect")
+		if err != nil {
+			cmd.Printf("Failed to get on-disconnect flag: %v\n", err)
+			return
+		}
+
 		t := &tunDevice{
 			name:     interfaceName,
 			mtu:      mtu,
@@ -184,6 +196,13 @@ var nativeTunCmd = &cobra.Command{
 
 		log.Printf("Created TUN device: %s", t.name)
 
+		hookEnv := map[string]string{
+			"USQUE_MODE":  "nativetun",
+			"USQUE_IFACE": t.name,
+			"USQUE_IPV4":  config.AppConfig.IPv4,
+			"USQUE_IPV6":  config.AppConfig.IPv6,
+		}
+
 		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
 			TLSConfig:         tlsConfig,
 			KeepalivePeriod:   keepalivePeriod,
@@ -194,6 +213,9 @@ var nativeTunCmd = &cobra.Command{
 			ReconnectDelay:    reconnectDelay,
 			AlwaysReconnect:   alwaysReconnect,
 			UseHTTP2:          useHTTP2,
+			OnConnect:         onConnect,
+			OnDisconnect:      onDisconnect,
+			HookEnv:           hookEnv,
 		})
 
 		log.Println("Tunnel established, you may now set up routing and DNS")
@@ -218,5 +240,7 @@ func init() {
 	nativeTunCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
 	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom interface name for the TUN interface")
 	nativeTunCmd.Flags().Bool("persist", false, "Linux only: Keep the TUN interface after exit")
+	nativeTunCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
+	nativeTunCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
 	rootCmd.AddCommand(nativeTunCmd)
 }

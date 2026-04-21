@@ -160,6 +160,26 @@ type MaintainTunnelConfig struct {
 	ReconnectDelay    time.Duration
 	AlwaysReconnect   bool
 	UseHTTP2          bool
+	// OnConnect is a path to an executable run after every successful tunnel
+	// connect. It is exec'd directly (no shell, no args) and runs fire-and-forget.
+	OnConnect string
+	// OnDisconnect is a path to an executable run after every tunnel loss.
+	// It is exec'd directly (no shell, no args) and runs fire-and-forget.
+	OnDisconnect string
+	// HookEnv is a set of USQUE_* environment variables layered on top of the
+	// parent process env for OnConnect / OnDisconnect invocations. USQUE_EVENT
+	// and USQUE_ENDPOINT are set by MaintainTunnel itself.
+	HookEnv map[string]string
+}
+
+// cloneHookEnv returns a shallow copy of src so concurrent hook invocations
+// do not share a map.
+func cloneHookEnv(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src)+2)
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
 }
 
 // sleepCtx sleeps for d or until ctx is cancelled, whichever comes first.
@@ -265,6 +285,13 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		log.Println("Connected to MASQUE server")
 
+		if cfg.OnConnect != "" {
+			env := cloneHookEnv(cfg.HookEnv)
+			env["USQUE_EVENT"] = "connect"
+			env["USQUE_ENDPOINT"] = cfg.Endpoint.String()
+			RunHook(cfg.OnConnect, env)
+		}
+
 		errChan := make(chan error, 2)
 		pumpCtx, cancelPumps := context.WithCancel(ctx)
 		var wg sync.WaitGroup
@@ -342,6 +369,13 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		err = <-errChan
 		log.Printf("Tunnel connection lost: %v. Reconnecting...", err)
+
+		if cfg.OnDisconnect != "" {
+			env := cloneHookEnv(cfg.HookEnv)
+			env["USQUE_EVENT"] = "disconnect"
+			env["USQUE_ENDPOINT"] = cfg.Endpoint.String()
+			RunHook(cfg.OnDisconnect, env)
+		}
 
 		cancelPumps()
 		ipConn.Close()

@@ -2,7 +2,7 @@
 
 🥚➡️🍏🍎
 
-Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel (currently Linux only), a SOCKS5 proxy, and a HTTP proxy.
+Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel, a SOCKS5 proxy, and a HTTP proxy.
 
 ## Table of Contents
 
@@ -22,6 +22,9 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
     - [SOCKS5 Proxy Mode (easy, cross-platform)](#socks5-proxy-mode-easy-cross-platform)
     - [HTTP Proxy Mode (easy, cross-platform)](#http-proxy-mode-easy-cross-platform)
     - [Port Forwarding Mode (for Advanced Users, cross-platform)](#port-forwarding-mode-for-advanced-users-cross-platform)
+    - [Connect/Disconnect Hooks](#connectdisconnect-hooks)
+      - [Example on Linux](#example-on-linux)
+      - [Example on Windows](#example-on-windows)
     - [TCP and HTTP/2 Support](#tcp-and-http2-support)
       - [HTTP/2 Configuration](#http2-configuration)
     - [Configuration](#configuration)
@@ -336,6 +339,72 @@ $ ./usque portfw -R 100.96.0.3:8080:localhost:8080 -L localhost:8081:100.96.0.2:
 
 > [!TIP]
 > Any number of ports are supported. You can chain many ports together if you specify the flag and the corresponding argument one after another.
+
+### Connect/Disconnect Hooks
+
+All tunnel modes can invoke an external executable after each successful tunnel connect and after each tunnel loss. This is useful for re-applying routes, firewall rules, or notifications without hard-coding them into the tool.
+
+- `--on-connect <path>`: executed after every successful connect (including reconnects).
+- `--on-disconnect <path>`: executed after every tunnel loss.
+
+Both flags take a path to a single executable. The path is **exececuted directly**, so no shell is spawned, and no arguments are passed. If you need a one-liner like `ip route add ...`, wrap it in a small shell script.
+
+Hooks run **fire-and-forget** in the background, so a hung hook cannot stall the tunnel. Their stdout and stderr are captured line-by-line and forwarded to the standard log with a `hook[connect]` / `hook[disconnect]` prefix.
+
+The hook subprocess inherits the parent environment (so `PATH`, `HOME`, etc. work normally) plus the following `USQUE_*` variables:
+
+- `USQUE_EVENT`: `connect` or `disconnect`.
+- `USQUE_MODE`: `nativetun`, `socks`, `http-proxy`, or `portfw`.
+- `USQUE_IFACE`: tun interface name (only set in `nativetun` mode).
+- `USQUE_IPV4`: internal IPv4 from the config.
+- `USQUE_IPV6`: internal IPv6 from the config.
+- `USQUE_ENDPOINT`: MASQUE endpoint address the tunnel is using.
+
+#### Example on Linux
+
+```shell
+$ sudo ./usque nativetun \
+    --on-connect /etc/usque/up.sh \
+    --on-disconnect /etc/usque/down.sh
+```
+
+```shell
+# /etc/usque/up.sh
+#!/bin/sh
+set -e
+ip route replace 162.159.198.1/32 via 192.168.1.1 dev eth0
+ip route del default || true
+ip route replace default dev "$USQUE_IFACE"
+ip -6 route replace default dev "$USQUE_IFACE"
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+```
+
+#### Example on Windows
+
+On Windows you can point `--on-connect` / `--on-disconnect` at a `.bat`, `.cmd`, or `.exe`. Env vars are accessed as `%USQUE_IFACE%`, `%USQUE_IPV4%`, etc. Run `usque` in an elevated Command Prompt so the hook inherits the privileges needed to modify routes.
+
+```cmd
+> usque.exe nativetun ^
+    --on-connect C:\usque\up.bat ^
+    --on-disconnect C:\usque\down.bat
+```
+
+```bat
+@rem C:\usque\up.bat
+@echo off
+netsh interface ipv4 delete route 0.0.0.0/0 "%USQUE_IFACE%" >nul 2>&1
+netsh interface ipv4 add route    0.0.0.0/0 "%USQUE_IFACE%" 0.0.0.0
+netsh interface ipv6 delete route ::/0      "%USQUE_IFACE%" >nul 2>&1
+netsh interface ipv6 add route    ::/0      "%USQUE_IFACE%" ::
+```
+
+If you prefer PowerShell, keep the hook itself pointed at a small `.bat` stub that invokes `powershell.exe -NoProfile -ExecutionPolicy Bypass -File up.ps1`. the hook runner does not accept extra arguments, so AFAIK a wrapper is the simplest way to reach a `.ps1`.
+
+> [!TIP]
+> Because `on-connect` fires on every reconnect, write your scripts to be idempotent. Prefer `ip route replace` / `netsh ... delete` + `add` over plain `add`, check-before-add for firewall rules, and so on.
+
+> [!NOTE]
+> Hooks are not run on initial process startup before the first connect, nor on final process shutdown. They fire strictly in response to tunnel lifecycle events.
 
 ### TCP and HTTP/2 Support
 

@@ -205,6 +205,24 @@ var httpProxyCmd = &cobra.Command{
 			return
 		}
 
+		onConnect, err := cmd.Flags().GetString("on-connect")
+		if err != nil {
+			cmd.Printf("Failed to get on-connect flag: %v\n", err)
+			return
+		}
+
+		onDisconnect, err := cmd.Flags().GetString("on-disconnect")
+		if err != nil {
+			cmd.Printf("Failed to get on-disconnect flag: %v\n", err)
+			return
+		}
+
+		hookEnv := map[string]string{
+			"USQUE_MODE": "http-proxy",
+			"USQUE_IPV4": config.AppConfig.IPv4,
+			"USQUE_IPV6": config.AppConfig.IPv6,
+		}
+
 		var authHeader string
 		if username != "" && password != "" {
 			authHeader = "Basic " + internal.LoginToBase64(username, password)
@@ -229,6 +247,9 @@ var httpProxyCmd = &cobra.Command{
 			ReconnectDelay:    reconnectDelay,
 			AlwaysReconnect:   alwaysReconnect,
 			UseHTTP2:          useHTTP2,
+			OnConnect:         onConnect,
+			OnDisconnect:      onDisconnect,
+			HookEnv:           hookEnv,
 		})
 
 		server := &http.Server{
@@ -420,5 +441,7 @@ func init() {
 	httpProxyCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
 	httpProxyCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
 	httpProxyCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
+	httpProxyCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
+	httpProxyCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
 	rootCmd.AddCommand(httpProxyCmd)
 }

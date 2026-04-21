@@ -204,6 +204,24 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
+		onConnect, err := cmd.Flags().GetString("on-connect")
+		if err != nil {
+			cmd.Printf("Failed to get on-connect flag: %v\n", err)
+			return
+		}
+
+		onDisconnect, err := cmd.Flags().GetString("on-disconnect")
+		if err != nil {
+			cmd.Printf("Failed to get on-disconnect flag: %v\n", err)
+			return
+		}
+
+		hookEnv := map[string]string{
+			"USQUE_MODE": "socks",
+			"USQUE_IPV4": config.AppConfig.IPv4,
+			"USQUE_IPV6": config.AppConfig.IPv6,
+		}
+
 		tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
 		if err != nil {
 			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
@@ -221,6 +239,9 @@ var socksCmd = &cobra.Command{
 			ReconnectDelay:    reconnectDelay,
 			AlwaysReconnect:   alwaysReconnect,
 			UseHTTP2:          useHTTP2,
+			OnConnect:         onConnect,
+			OnDisconnect:      onDisconnect,
+			HookEnv:           hookEnv,
 		})
 
 		var resolver socks5.NameResolver
@@ -286,5 +307,7 @@ func init() {
 	socksCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
 	socksCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
 	socksCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
+	socksCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
+	socksCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
 	rootCmd.AddCommand(socksCmd)
 }
