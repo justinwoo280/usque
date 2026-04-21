@@ -173,6 +173,16 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
+		systemDNS, err := cmd.Flags().GetBool("system-dns")
+		if err != nil {
+			cmd.Printf("Failed to get system-dns flag: %v\n", err)
+			return
+		}
+		if systemDNS && !localDNS {
+			log.Println("Warning: --system-dns only applies with -l; ignoring")
+			systemDNS = false
+		}
+
 		mtu, err := cmd.Flags().GetInt("mtu")
 		if err != nil {
 			cmd.Printf("Failed to get MTU: %v\n", err)
@@ -253,8 +263,9 @@ var socksCmd = &cobra.Command{
 		})
 
 		resolver := &internal.TunnelDNSResolver{
-			DNSAddrs: dnsAddrs,
-			Timeout:  dnsTimeout,
+			DNSAddrs:        dnsAddrs,
+			Timeout:         dnsTimeout,
+			UseOSResolver:   localDNS && systemDNS,
 		}
 		if !localDNS {
 			resolver.TunNet = tunNet
@@ -288,7 +299,7 @@ func init() {
 	socksCmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	socksCmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
 	socksCmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
-	socksCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers to use")
+	socksCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers for the tunnel stack; with -l also used for SOCKS name lookups (unless --system-dns)")
 	socksCmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")
 	socksCmd.Flags().BoolP("ipv6", "6", false, "Use IPv6 for MASQUE connection")
 	socksCmd.Flags().BoolP("no-tunnel-ipv4", "F", false, "Disable IPv4 inside the MASQUE tunnel")
@@ -302,7 +313,8 @@ func init() {
 	socksCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
 	socksCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
 	socksCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
-	socksCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
+	socksCmd.Flags().BoolP("local-dns", "l", false, "Do not send proxy DNS through the tunnel; use -d over the host instead. Add --system-dns to use the OS resolver instead of -d")
+	socksCmd.Flags().Bool("system-dns", false, "With -l, resolve names via the OS (e.g. /etc/resolv.conf) instead of -d")
 	socksCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
 	socksCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
 	rootCmd.AddCommand(socksCmd)
