@@ -162,6 +162,25 @@ type MaintainTunnelConfig struct {
 	UseHTTP2          bool
 }
 
+// sleepCtx sleeps for d or until ctx is cancelled, whichever comes first.
+// Returns ctx.Err() on cancellation and nil on normal completion.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
 // MaintainTunnel continuously connects to the MASQUE server, then starts two
 // forwarding goroutines: one forwarding from the device to the IP connection (and handling
 // any ICMP reply), and the other forwarding from the IP connection to the device.
@@ -184,6 +203,10 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 	packetBufferPool := NewNetBuffer(cfg.MTU)
 
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+
 		if !cfg.AlwaysReconnect {
 			log.Println("Tunnel idle. Waiting for outbound activity before reconnecting...")
 			buf := packetBufferPool.Get()
@@ -191,7 +214,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			if err != nil {
 				packetBufferPool.Put(buf)
 				log.Printf("Failed to read from TUN device while waiting for activity: %v", err)
-				time.Sleep(cfg.ReconnectDelay)
+				if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
+					return
+				}
 				continue
 			}
 			packetBufferPool.Put(buf)
@@ -209,19 +234,32 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
-			time.Sleep(cfg.ReconnectDelay)
+			if ipConn != nil {
+				_ = ipConn.Close()
+			}
+			if tr != nil {
+				_ = tr.Close()
+			}
+			if udpConn != nil {
+				_ = udpConn.Close()
+			}
+			if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
+				return
+			}
 			continue
 		}
 		if rsp.StatusCode != 200 {
 			log.Printf("Tunnel connection failed: %s", rsp.Status)
-			ipConn.Close()
-			if udpConn != nil {
-				udpConn.Close()
-			}
+			_ = ipConn.Close()
 			if tr != nil {
-				tr.Close()
+				_ = tr.Close()
 			}
-			time.Sleep(cfg.ReconnectDelay)
+			if udpConn != nil {
+				_ = udpConn.Close()
+			}
+			if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
+				return
+			}
 			continue
 		}
 
@@ -325,6 +363,8 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		if udpConn != nil {
 			udpConn.Close()
 		}
-		time.Sleep(cfg.ReconnectDelay)
+		if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
+			return
+		}
 	}
 }
