@@ -188,7 +188,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	if err != nil {
 		_ = tr.Close()
 		_ = conn.CloseWithError(0, "connect-ip dial failed")
-		if err.Error() == "CRYPTO_ERROR 0x131 (remote): tls: access denied" {
+		if strings.Contains(err.Error(), "tls: access denied") {
 			return udpConn, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
 		}
 		return udpConn, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %w", err)
