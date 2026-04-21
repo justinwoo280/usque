@@ -143,6 +143,12 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 	return &WaterAdapter{iface: iface}
 }
 
+// pumpShutdownGrace bounds how long the supervisor waits for both forwarding
+// pumps to exit after an error before spawning a fresh pair. A device-side
+// pump may still be parked in a blocking TUN read during this window; the
+// readMu serializes any overlap with the next cycle's device reader.
+const pumpShutdownGrace = 2 * time.Second
+
 // MaintainTunnelConfig contains runtime settings for tunnel maintenance.
 type MaintainTunnelConfig struct {
 	TLSConfig         *tls.Config
@@ -222,14 +228,29 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		log.Println("Connected to MASQUE server")
 
 		errChan := make(chan error, 2)
+		pumpCtx, cancelPumps := context.WithCancel(ctx)
+		var wg sync.WaitGroup
+		var readMu sync.Mutex
+
+		wg.Add(2)
 
 		go func() {
+			defer wg.Done()
 			for {
+				if pumpCtx.Err() != nil {
+					return
+				}
 				buf := packetBufferPool.Get()
+				readMu.Lock()
 				n, err := cfg.Device.ReadPacket(buf)
+				readMu.Unlock()
 				if err != nil {
 					packetBufferPool.Put(buf)
 					errChan <- fmt.Errorf("failed to read from TUN device: %w", err)
+					return
+				}
+				if pumpCtx.Err() != nil {
+					packetBufferPool.Put(buf)
 					return
 				}
 				icmp, err := ipConn.WritePacket(buf[:n])
@@ -257,6 +278,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}()
 
 		go func() {
+			defer wg.Done()
 			buf := packetBufferPool.Get()
 			defer packetBufferPool.Put(buf)
 			for {
@@ -282,12 +304,26 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		err = <-errChan
 		log.Printf("Tunnel connection lost: %v. Reconnecting...", err)
+
+		cancelPumps()
 		ipConn.Close()
-		if udpConn != nil {
-			udpConn.Close()
+
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(pumpShutdownGrace):
+			log.Printf("Pump shutdown grace of %s expired; a stale TUN reader may still be parked (readMu will serialize next cycle)", pumpShutdownGrace)
 		}
+
 		if tr != nil {
 			tr.Close()
+		}
+		if udpConn != nil {
+			udpConn.Close()
 		}
 		time.Sleep(cfg.ReconnectDelay)
 	}
