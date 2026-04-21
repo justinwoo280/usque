@@ -12,7 +12,6 @@ import (
 	"github.com/Diniboy1123/usque/config"
 	"github.com/Diniboy1123/usque/internal"
 	"github.com/spf13/cobra"
-	"github.com/things-go/go-socks5"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
@@ -198,6 +197,15 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
+		udpTimeout, err := cmd.Flags().GetDuration("udp-timeout")
+		if err != nil {
+			cmd.Printf("Failed to get UDP timeout: %v\n", err)
+			return
+		}
+		if udpTimeout <= 0 {
+			log.Println("Warning: --udp-timeout is 0; idle UDP ASSOCIATE exchanges will never expire. Memory will grow under heavy UDP traffic (DHT, uTP, etc.).")
+		}
+
 		alwaysReconnect, err := cmd.Flags().GetBool("always-reconnect")
 		if err != nil {
 			cmd.Printf("Failed to get always-reconnect flag: %v\n", err)
@@ -244,43 +252,30 @@ var socksCmd = &cobra.Command{
 			HookEnv:           hookEnv,
 		})
 
-		var resolver socks5.NameResolver
-		if localDNS {
-			resolver = internal.TunnelDNSResolver{TunNet: nil, DNSAddrs: dnsAddrs, Timeout: dnsTimeout}
-		} else {
-			resolver = internal.TunnelDNSResolver{TunNet: tunNet, DNSAddrs: dnsAddrs, Timeout: dnsTimeout}
+		resolver := &internal.TunnelDNSResolver{
+			DNSAddrs: dnsAddrs,
+			Timeout:  dnsTimeout,
+		}
+		if !localDNS {
+			resolver.TunNet = tunNet
 		}
 
-		var server *socks5.Server
-		if username == "" || password == "" {
-			server = socks5.NewServer(
-				socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
-				socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return tunNet.DialContext(ctx, network, addr)
-				}),
-				socks5.WithResolver(resolver),
-			)
-		} else {
-			server = socks5.NewServer(
-				socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
-				socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return tunNet.DialContext(ctx, network, addr)
-				}),
-				socks5.WithResolver(resolver),
-				socks5.WithAuthMethods(
-					[]socks5.Authenticator{
-						socks5.UserPassAuthenticator{
-							Credentials: socks5.StaticCredentials{
-								username: password,
-							},
-						},
-					},
-				),
-			)
+		server, err := internal.NewSOCKS5Server(internal.SOCKS5Config{
+			Addr:       net.JoinHostPort(bindAddress, port),
+			Username:   username,
+			Password:   password,
+			Resolver:   resolver,
+			TunNet:     tunNet,
+			UDPTimeout: udpTimeout,
+			Logger:     log.New(internal.NewTZStampWriter(os.Stderr), "socks5: ", 0),
+		})
+		if err != nil {
+			cmd.Printf("Failed to create SOCKS proxy: %v\n", err)
+			return
 		}
 
 		log.Printf("SOCKS proxy listening on %s:%s", bindAddress, port)
-		if err := server.ListenAndServe("tcp", net.JoinHostPort(bindAddress, port)); err != nil {
+		if err := server.Start(); err != nil {
 			cmd.Printf("Failed to start SOCKS proxy: %v\n", err)
 			return
 		}
@@ -303,6 +298,7 @@ func init() {
 	socksCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 0, "Custom initial packet size for MASQUE connection (default: auto with PMTU discovery)")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	socksCmd.Flags().Duration("udp-timeout", 60*time.Second, "Idle read deadline for each remote UDP relay (SOCKS5 ASSOCIATE). Shorter frees memory sooner; raise (e.g. 300s) if a quiet peer needs longer silence. 0 disables the deadline and risks unbounded growth under DHT/uTP")
 	socksCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
 	socksCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
 	socksCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")

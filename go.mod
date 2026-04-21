@@ -7,7 +7,8 @@ require (
 	github.com/quic-go/quic-go v0.59.0
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/spf13/cobra v1.10.2
-	github.com/things-go/go-socks5 v0.1.1
+	github.com/txthinking/runnergroup v0.0.0-20210608031112-152c7c4432bf
+	github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e
 	github.com/vishvananda/netlink v1.3.1
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	golang.org/x/net v0.52.0
@@ -19,6 +20,7 @@ require (
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
