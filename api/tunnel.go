@@ -378,7 +378,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 
 		cancelPumps()
-		ipConn.Close()
+		_ = ipConn.Close()
 
 		done := make(chan struct{})
 		go func() {
@@ -392,10 +392,10 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 
 		if tr != nil {
-			tr.Close()
+			_ = tr.Close()
 		}
 		if udpConn != nil {
-			udpConn.Close()
+			_ = udpConn.Close()
 		}
 		if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
 			return

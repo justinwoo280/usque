@@ -62,7 +62,7 @@ func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Co
 		return ctx, nil, fmt.Errorf("no DNS servers configured")
 	}
 
-	var queryCtx context.Context = ctx
+	queryCtx := ctx
 	var cancel context.CancelFunc
 	if r.Timeout > 0 {
 		queryCtx, cancel = context.WithTimeout(ctx, r.Timeout)

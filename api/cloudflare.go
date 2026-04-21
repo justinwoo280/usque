@@ -90,7 +90,7 @@ func Register(model, locale, jwt string, acceptTos bool) (models.AccountData, er
 	if err != nil {
 		return models.AccountData{}, fmt.Errorf("failed to send request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return models.AccountData{}, fmt.Errorf("failed to register: %v", resp.Status)
@@ -153,7 +153,7 @@ func EnrollKey(accountData models.AccountData, pubKey []byte, deviceName string)
 	if err != nil {
 		return models.AccountData{}, nil, fmt.Errorf("failed to send request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

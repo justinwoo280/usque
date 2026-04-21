@@ -132,7 +132,7 @@ func (s *SOCKS5Server) listenAndServe() error {
 					return err
 				}
 				go func(c *net.TCPConn) {
-					defer c.Close()
+					defer func() { _ = c.Close() }()
 					if err := srv.Negotiate(c); err != nil {
 						log.Println(err)
 						return
@@ -274,7 +274,7 @@ func (s *SOCKS5Server) TCPHandle(srv *socks5.Server, c *net.TCPConn, r *socks5.R
 		if err != nil {
 			return err
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 
 		go func() {
 			bp := tcpRelayBufPool.Get().(*[]byte)
@@ -365,7 +365,7 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 		RemoteConn: rc,
 	}
 	if err := send(ue, d.Data); err != nil {
-		ue.RemoteConn.Close()
+		_ = ue.RemoteConn.Close()
 		return err
 	}
 	srv.UDPExchanges.Set(src+dst, ue, -1)
@@ -374,7 +374,7 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 	udpRelaySem <- struct{}{}
 	go func(ue *socks5.UDPExchange, dst string) {
 		defer func() {
-			ue.RemoteConn.Close()
+			_ = ue.RemoteConn.Close()
 			srv.UDPExchanges.Delete(ue.ClientAddr.String() + dst)
 			<-udpRelaySem
 		}()

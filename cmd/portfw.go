@@ -247,7 +247,7 @@ var portFwCmd = &cobra.Command{
 			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
 			return
 		}
-		defer tunDev.Close()
+		defer func() { _ = tunDev.Close() }()
 
 		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
 			TLSConfig:         tlsConfig,
@@ -298,7 +298,7 @@ var portFwCmd = &cobra.Command{
 			cmd.Printf("Failed to make request to cloudflare.com: %v\n", err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != 204 {
 			cmd.Printf("Failed to make request to cloudflare.com: %s\n", resp.Status)
 			return
@@ -330,7 +330,7 @@ func forwardPort(netstackNet *netstack.Net, pm internal.PortMapping, isRemote bo
 		if err != nil {
 			return fmt.Errorf("failed to listen on %s: %w", localAddrPort, err)
 		}
-		defer listener.Close()
+		defer func() { _ = listener.Close() }()
 
 		log.Printf("Remote forwarding: Listening on MASQUE network %s, forwarding to local %s:%d", localAddrPort, pm.RemoteIP, pm.RemotePort)
 
@@ -349,7 +349,7 @@ func forwardPort(netstackNet *netstack.Net, pm internal.PortMapping, isRemote bo
 		if err != nil {
 			return fmt.Errorf("failed to listen on %s:%d: %w", pm.BindAddress, pm.LocalPort, err)
 		}
-		defer listener.Close()
+		defer func() { _ = listener.Close() }()
 
 		log.Printf("Local forwarding: Listening on %s:%d, forwarding to remote %s:%d", pm.BindAddress, pm.LocalPort, pm.RemoteIP, pm.RemotePort)
 
@@ -373,7 +373,7 @@ func forwardPort(netstackNet *netstack.Net, pm internal.PortMapping, isRemote bo
 //   - isRemote: bool - Indicates whether the connection is remote-forwarded.
 //   - tunNet: *netstack.Net - The network stack used for making remote connections.
 func handleConnection(localConn net.Conn, pm internal.PortMapping, isRemote bool, tunNet *netstack.Net) {
-	defer localConn.Close()
+	defer func() { _ = localConn.Close() }()
 
 	remoteAddrPort, err := netip.ParseAddrPort(fmt.Sprintf("%s:%d", pm.RemoteIP, pm.RemotePort))
 	if err != nil {
@@ -394,10 +394,10 @@ func handleConnection(localConn net.Conn, pm internal.PortMapping, isRemote bool
 		log.Printf("Failed to connect to remote %s: %v", remoteAddrPort, err)
 		return
 	}
-	defer remoteConn.Close()
+	defer func() { _ = remoteConn.Close() }()
 
-	go func() { io.Copy(remoteConn, localConn) }()
-	io.Copy(localConn, remoteConn)
+	go func() { _, _ = io.Copy(remoteConn, localConn) }()
+	_, _ = io.Copy(localConn, remoteConn)
 }
 
 func init() {

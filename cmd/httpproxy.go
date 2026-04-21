@@ -243,7 +243,7 @@ var httpProxyCmd = &cobra.Command{
 			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
 			return
 		}
-		defer tunDev.Close()
+		defer func() { _ = tunDev.Close() }()
 
 		resolver := internal.GetProxyResolver(localDNS, systemDNS, tunNet, dnsAddrs, dnsTimeout)
 
@@ -336,30 +336,30 @@ func handleHTTPSConnect(w http.ResponseWriter, r *http.Request, tunNet *netstack
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		destConn.Close()
+		_ = destConn.Close()
 		return
 	}
 
 	clientConn, _, err := hj.Hijack()
 	if err != nil {
 		http.Error(w, "Hijacking failed", http.StatusInternalServerError)
-		destConn.Close()
+		_ = destConn.Close()
 		return
 	}
 
 	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	if err != nil {
-		clientConn.Close()
-		destConn.Close()
+		_ = clientConn.Close()
+		_ = destConn.Close()
 		return
 	}
 
 	go func() {
-		defer destConn.Close()
-		defer clientConn.Close()
-		io.Copy(destConn, clientConn)
+		defer func() { _ = destConn.Close() }()
+		defer func() { _ = clientConn.Close() }()
+		_, _ = io.Copy(destConn, clientConn)
 	}()
-	io.Copy(clientConn, destConn)
+	_, _ = io.Copy(clientConn, destConn)
 }
 
 // handleHTTPProxy forwards HTTP proxy requests to the destination and relays responses back to the client using the provided resolver.
@@ -370,11 +370,6 @@ func handleHTTPSConnect(w http.ResponseWriter, r *http.Request, tunNet *netstack
 //   - tunNet: *netstack.Net - The netstack network interface.
 //   - resolver: *net.Resolver - The DNS resolver to use for the tunnel.
 func handleHTTPProxy(w http.ResponseWriter, r *http.Request, tunNet *netstack.Net, resolver *net.Resolver) {
-	port := r.URL.Port()
-	if port == "" {
-		port = "80"
-	}
-
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -411,11 +406,11 @@ func handleHTTPProxy(w http.ResponseWriter, r *http.Request, tunNet *netstack.Ne
 		http.Error(w, "Failed to reach destination", http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // copyHeader copies HTTP headers from one header map to another.

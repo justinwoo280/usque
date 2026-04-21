@@ -107,7 +107,9 @@ var registerCmd = &cobra.Command{
 			IPv6:           updatedAccountData.Config.Interface.Addresses.V6,
 		}
 
-		config.AppConfig.SaveConfig(configPath)
+		if err := config.AppConfig.SaveConfig(configPath); err != nil {
+			log.Fatalf("Failed to save config: %v", err)
+		}
 
 		log.Printf("Config saved to %s", configPath)
 	},

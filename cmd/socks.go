@@ -245,7 +245,7 @@ var socksCmd = &cobra.Command{
 			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
 			return
 		}
-		defer tunDev.Close()
+		defer func() { _ = tunDev.Close() }()
 
 		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
 			TLSConfig:         tlsConfig,

@@ -43,7 +43,7 @@ func LoadConfig(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open config file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&AppConfig); err != nil {
@@ -67,7 +67,7 @@ func (*Config) SaveConfig(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
