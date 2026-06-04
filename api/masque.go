@@ -13,8 +13,9 @@ import (
 	"strings"
 
 	connectip "github.com/Diniboy1123/connect-ip-go"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/Diniboy1123/usque/internal"
+	"github.com/apernet/quic-go"
+	"github.com/apernet/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
 )
@@ -106,7 +107,7 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
 //   - *connectip.Conn: The Connect-IP connection instance.
 //   - *http.Response: The response from the Connect-IP handshake.
 //   - error: An error if the connection setup fails.
-func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool, onQUICConnect func(*quic.Conn), preNoise internal.NoiseConfig) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
 	template := uritemplate.MustNew(connectUri)
 	additionalHeaders := http.Header{
 		"User-Agent": []string{""},
@@ -160,6 +161,10 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		return udpConn, nil, nil, nil, err
 	}
 
+	if preNoise.Count > 0 {
+		internal.InjectUDPPreNoise(udpConn, quicEndpoint, preNoise)
+	}
+
 	conn, err := quic.Dial(
 		ctx,
 		udpConn,
@@ -169,6 +174,10 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	)
 	if err != nil {
 		return udpConn, nil, nil, nil, err
+	}
+
+	if onQUICConnect != nil {
+		onQUICConnect(conn)
 	}
 
 	tr := &http3.Transport{

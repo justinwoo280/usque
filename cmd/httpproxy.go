@@ -260,6 +260,9 @@ var httpProxyCmd = &cobra.Command{
 			OnConnect:         onConnect,
 			OnDisconnect:      onDisconnect,
 			HookEnv:           hookEnv,
+			OnQUICConnect:     congestionCallback(cmd),
+			Noise:             noiseConfig(cmd),
+			PreNoise:          preNoiseConfig(cmd),
 		})
 
 		server := &http.Server{
@@ -449,5 +452,7 @@ func init() {
 	httpProxyCmd.Flags().Bool("system-dns", false, "With -l, resolve names via the OS (e.g. /etc/resolv.conf) instead of -d")
 	httpProxyCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
 	httpProxyCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
+	addCongestionFlags(httpProxyCmd)
+	addNoiseFlags(httpProxyCmd)
 	rootCmd.AddCommand(httpProxyCmd)
 }

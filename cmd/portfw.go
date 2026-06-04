@@ -262,6 +262,9 @@ var portFwCmd = &cobra.Command{
 			OnConnect:         onConnect,
 			OnDisconnect:      onDisconnect,
 			HookEnv:           hookEnv,
+			OnQUICConnect:     congestionCallback(cmd),
+			Noise:             noiseConfig(cmd),
+			PreNoise:          preNoiseConfig(cmd),
 		})
 
 		log.Printf("Virtual tunnel created, forwarding ports")
@@ -419,5 +422,7 @@ func init() {
 	portFwCmd.Flags().Bool("dont-always-reconnect", false, "Disable always reconnect in portfw; reconnect only when new activity arrives")
 	portFwCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
 	portFwCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
+	addCongestionFlags(portFwCmd)
+	addNoiseFlags(portFwCmd)
 	rootCmd.AddCommand(portFwCmd)
 }

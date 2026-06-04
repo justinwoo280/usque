@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20260409225322-8d7bb0a858a2
-	github.com/quic-go/quic-go v0.59.0
+	github.com/apernet/quic-go v0.59.1-0.20260425001925-6c6cc9bcb716
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/spf13/cobra v1.10.2
 	github.com/txthinking/runnergroup v0.0.0-20210608031112-152c7c4432bf
@@ -32,3 +32,5 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 )
+
+replace github.com/Diniboy1123/connect-ip-go => ./connect-ip

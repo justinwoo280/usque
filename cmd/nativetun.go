@@ -216,6 +216,9 @@ var nativeTunCmd = &cobra.Command{
 			OnConnect:         onConnect,
 			OnDisconnect:      onDisconnect,
 			HookEnv:           hookEnv,
+			OnQUICConnect:     congestionCallback(cmd),
+			Noise:             noiseConfig(cmd),
+			PreNoise:          preNoiseConfig(cmd),
 		})
 
 		log.Println("Tunnel established, you may now set up routing and DNS")
@@ -242,5 +245,7 @@ func init() {
 	nativeTunCmd.Flags().Bool("persist", false, "Linux only: Keep the TUN interface after exit")
 	nativeTunCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
 	nativeTunCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
+	addCongestionFlags(nativeTunCmd)
+	addNoiseFlags(nativeTunCmd)
 	rootCmd.AddCommand(nativeTunCmd)
 }

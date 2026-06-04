@@ -12,6 +12,7 @@ import (
 
 	connectip "github.com/Diniboy1123/connect-ip-go"
 	"github.com/Diniboy1123/usque/internal"
+	"github.com/apernet/quic-go"
 	"github.com/songgao/water"
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -170,6 +171,17 @@ type MaintainTunnelConfig struct {
 	// parent process env for OnConnect / OnDisconnect invocations. USQUE_EVENT
 	// and USQUE_ENDPOINT are set by MaintainTunnel itself.
 	HookEnv map[string]string
+	// OnQUICConnect is called after each successful QUIC dial, receiving the
+	// raw *quic.Conn. Use this to swap in a custom congestion controller.
+	OnQUICConnect func(*quic.Conn)
+	// Noise controls DATAGRAM noise injection after tunnel establishment.
+	// When Count > 0, noise datagrams are sent before the bidirectional pump
+	// starts, making tunnel establishment indistinguishable from data transfer.
+	Noise internal.NoiseConfig
+	// PreNoise controls raw UDP noise injection before the QUIC handshake.
+	// Packets are sent through the same socket used for QUIC, ensuring matching
+	// source port for flow-level obfuscation.
+	PreNoise internal.NoiseConfig
 }
 
 // cloneHookEnv returns a shallow copy of src so concurrent hook invocations
@@ -251,6 +263,8 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			internal.ConnectURI,
 			cfg.Endpoint,
 			cfg.UseHTTP2,
+			cfg.OnQUICConnect,
+			cfg.PreNoise,
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
@@ -366,6 +380,10 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				}
 			}
 		}()
+
+		if cfg.Noise.Count > 0 {
+			go internal.InjectNoise(ipConn, cfg.Noise)
+		}
 
 		err = <-errChan
 		log.Printf("Tunnel connection lost: %v. Reconnecting...", err)

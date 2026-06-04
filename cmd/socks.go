@@ -260,6 +260,9 @@ var socksCmd = &cobra.Command{
 			OnConnect:         onConnect,
 			OnDisconnect:      onDisconnect,
 			HookEnv:           hookEnv,
+			OnQUICConnect:     congestionCallback(cmd),
+			Noise:             noiseConfig(cmd),
+			PreNoise:          preNoiseConfig(cmd),
 		})
 
 		resolver := &internal.TunnelDNSResolver{
@@ -317,5 +320,7 @@ func init() {
 	socksCmd.Flags().Bool("system-dns", false, "With -l, resolve names via the OS (e.g. /etc/resolv.conf) instead of -d")
 	socksCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
 	socksCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
+	addCongestionFlags(socksCmd)
+	addNoiseFlags(socksCmd)
 	rootCmd.AddCommand(socksCmd)
 }
