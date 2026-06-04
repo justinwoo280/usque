@@ -1,0 +1,31 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+package bbr
+
+import (
+	"math"
+	"time"
+
+	"github.com/apernet/quic-go/congestion"
+)
+
+const (
+	infBandwidth = Bandwidth(math.MaxUint64)
+)
+
+// Bandwidth of a connection
+type Bandwidth uint64
+
+const (
+	// BitsPerSecond is 1 bit per second
+	BitsPerSecond Bandwidth = 1
+	// BytesPerSecond is 1 byte per second
+	BytesPerSecond = 8 * BitsPerSecond
+)
+
+// BandwidthFromDelta calculates the bandwidth from a number of bytes and a time delta
+func BandwidthFromDelta(bytes congestion.ByteCount, delta time.Duration) Bandwidth {
+	return Bandwidth(bytes) * Bandwidth(time.Second) / Bandwidth(delta) * BytesPerSecond
+}

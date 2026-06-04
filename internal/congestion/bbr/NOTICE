@@ -1,0 +1,28 @@
+BBR Congestion Control
+======================
+
+This directory contains a BBR congestion control implementation derived
+from the Hysteria project (github.com/apernet/hysteria), as vendored in
+Xray-core (github.com/xtls/xray-core).
+
+The original BBR algorithm was designed by Google for TCP. This Go
+implementation was written by the Hysteria authors, porting from the
+Chromium C++ codebase.
+
+The files in this directory are licensed under the Mozilla Public
+License, Version 2.0 (MPL 2.0). See the LICENSE file in this directory
+for the full license text.
+
+The rest of the usque project is licensed under the MIT License.
+The MPL 2.0-licensed BBR code is combined with the MIT-licensed usque
+code as a "Larger Work" per Section 3.3 of the MPL 2.0.
+
+Files under MPL 2.0:
+  - bbr_sender.go
+  - bandwidth.go
+  - bandwidth_sampler.go
+  - clock.go
+  - packet_number_indexed_queue.go
+  - pacer.go
+  - ringbuffer.go
+  - windowed_filter.go
