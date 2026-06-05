@@ -59,10 +59,6 @@ func (m *windowsRouteManager) Setup() error {
 		return fmt.Errorf("setup routes: %w", err)
 	}
 
-	if err := m.setupIPInterface(); err != nil {
-		return fmt.Errorf("setup IP interface: %w", err)
-	}
-
 	if err := m.setupDNS(); err != nil {
 		log.Printf("Warning: DNS setup failed: %v", err)
 	}
@@ -71,7 +67,7 @@ func (m *windowsRouteManager) Setup() error {
 		log.Printf("Warning: failed to flush DNS cache: %v", err)
 	}
 
-	log.Printf("Auto-route enabled (Windows): table=%d, dns=%d servers", m.cfg.TableIndex, len(m.cfg.DNSServers))
+	log.Printf("Auto-route enabled (Windows): dns=%d servers", len(m.cfg.DNSServers))
 	return nil
 }
 
@@ -172,42 +168,6 @@ func (m *windowsRouteManager) setupRoutes() error {
 		}
 		if err := m.luid.SetRoutes(routePtrs); err != nil {
 			return fmt.Errorf("set default routes: %w", err)
-		}
-	}
-
-	return nil
-}
-
-func (m *windowsRouteManager) setupIPInterface() error {
-	if m.cfg.EnableIPv4 {
-		ipif, err := m.luid.IPInterface(windows.AF_INET)
-		if err != nil {
-			return fmt.Errorf("get IPv4 interface: %w", err)
-		}
-		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
-		ipif.DadTransmits = 0
-		ipif.ManagedAddressConfigurationSupported = false
-		ipif.OtherStatefulConfigurationSupported = false
-		ipif.UseAutomaticMetric = false
-		ipif.Metric = 0
-		if err := ipif.Set(); err != nil {
-			return fmt.Errorf("set IPv4 interface: %w", err)
-		}
-	}
-
-	if m.cfg.EnableIPv6 {
-		ipif, err := m.luid.IPInterface(windows.AF_INET6)
-		if err != nil {
-			return fmt.Errorf("get IPv6 interface: %w", err)
-		}
-		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
-		ipif.DadTransmits = 0
-		ipif.ManagedAddressConfigurationSupported = false
-		ipif.OtherStatefulConfigurationSupported = false
-		ipif.UseAutomaticMetric = false
-		ipif.Metric = 0
-		if err := ipif.Set(); err != nil {
-			return fmt.Errorf("set IPv6 interface: %w", err)
 		}
 	}
 

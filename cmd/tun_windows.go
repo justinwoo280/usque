@@ -5,10 +5,12 @@ package cmd
 import (
 	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/Diniboy1123/usque/api"
-	"github.com/Diniboy1123/usque/internal"
+	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
 func (t *tunDevice) create() (api.TunnelDevice, error) {
@@ -26,50 +28,63 @@ func (t *tunDevice) create() (api.TunnelDevice, error) {
 		return nil, err
 	}
 
-	if t.ipv4 {
-		err = internal.SetIPv4Address(t.name, t.account.IPv4, "255.255.255.255")
-		if err != nil {
-			return nil, fmt.Errorf("failed to set IPv4 address: %v", err)
-		}
-		if err := internal.SetIPv4Peer(t.name, derivePeerIPv4Win(t.account.IPv4)); err != nil {
-			return nil, fmt.Errorf("failed to set IPv4 peer: %v", err)
-		}
+	iface, err := net.InterfaceByName(t.name)
+	if err != nil {
+		return nil, fmt.Errorf("find interface %s: %w", t.name, err)
+	}
+	luid := winipcfg.LUID(iface.Index)
 
-		err = internal.SetIPv4MTU(t.name, t.mtu)
-		if err != nil {
-			return nil, fmt.Errorf("failed to set IPv4 MTU: %v", err)
+	if t.ipv4 {
+		v4Addr := netip.MustParseAddr(t.account.IPv4)
+		if err := luid.SetIPAddresses([]netip.Prefix{
+			netip.PrefixFrom(v4Addr, 32),
+		}); err != nil {
+			return nil, fmt.Errorf("set IPv4 address: %w", err)
 		}
 	}
 
 	if t.ipv6 {
-		err = internal.SetIPv6Address(t.name, t.account.IPv6, "128")
-		if err != nil {
-			return nil, fmt.Errorf("failed to set IPv6 address: %v", err)
+		v6Addr := netip.MustParseAddr(t.account.IPv6)
+		if err := luid.SetIPAddresses([]netip.Prefix{
+			netip.PrefixFrom(v6Addr, 128),
+		}); err != nil {
+			return nil, fmt.Errorf("set IPv6 address: %w", err)
 		}
-		if err := internal.SetIPv6Peer(t.name, "fe80::1"); err != nil {
-			return nil, fmt.Errorf("failed to set IPv6 peer: %v", err)
-		}
+	}
 
-		err = internal.SetIPv6MTU(t.name, t.mtu)
+	if t.ipv4 {
+		ipif, err := luid.IPInterface(windows.AF_INET)
 		if err != nil {
-			return nil, fmt.Errorf("failed to set IPv6 MTU: %v", err)
+			return nil, fmt.Errorf("get IPv4 interface: %w", err)
+		}
+		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
+		ipif.DadTransmits = 0
+		ipif.ManagedAddressConfigurationSupported = false
+		ipif.OtherStatefulConfigurationSupported = false
+		ipif.NLMTU = uint32(t.mtu)
+		ipif.UseAutomaticMetric = false
+		ipif.Metric = 0
+		if err := ipif.Set(); err != nil {
+			return nil, fmt.Errorf("set IPv4 interface: %w", err)
+		}
+	}
+
+	if t.ipv6 {
+		ipif, err := luid.IPInterface(windows.AF_INET6)
+		if err != nil {
+			return nil, fmt.Errorf("get IPv6 interface: %w", err)
+		}
+		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
+		ipif.DadTransmits = 0
+		ipif.ManagedAddressConfigurationSupported = false
+		ipif.OtherStatefulConfigurationSupported = false
+		ipif.NLMTU = uint32(t.mtu)
+		ipif.UseAutomaticMetric = false
+		ipif.Metric = 0
+		if err := ipif.Set(); err != nil {
+			return nil, fmt.Errorf("set IPv6 interface: %w", err)
 		}
 	}
 
 	return api.NewNetstackAdapter(dev), nil
-}
-
-func derivePeerIPv4Win(localIP string) string {
-	ip := net.ParseIP(localIP).To4()
-	if ip == nil {
-		return "10.0.0.1"
-	}
-	peer := make(net.IP, 4)
-	copy(peer, ip)
-	if peer[3] < 255 {
-		peer[3]++
-	} else {
-		peer[3] = 1
-	}
-	return peer.String()
 }
