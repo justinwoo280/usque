@@ -3,6 +3,10 @@ package cmd
 import (
 	"context"
 	"log"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -18,6 +22,7 @@ type tunDevice struct {
 	ipv4     bool
 	ipv6     bool
 	persist  bool
+	tunFd    int
 }
 
 var nativeTunCmd = &cobra.Command{
@@ -179,6 +184,12 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
+		tunFd, err := cmd.Flags().GetInt("tun-fd")
+		if err != nil {
+			cmd.Printf("Failed to get tun-fd flag: %v\n", err)
+			return
+		}
+
 		t := &tunDevice{
 			name:     interfaceName,
 			mtu:      mtu,
@@ -186,6 +197,7 @@ var nativeTunCmd = &cobra.Command{
 			ipv4:     !tunnelIPv4,
 			ipv6:     !tunnelIPv6,
 			persist:  persist,
+			tunFd:    tunFd,
 		}
 
 		dev, err := t.create()
@@ -196,6 +208,43 @@ var nativeTunCmd = &cobra.Command{
 
 		log.Printf("Created TUN device: %s", t.name)
 
+		autoRoute, err := cmd.Flags().GetBool("auto-route")
+		if err != nil {
+			cmd.Printf("Failed to get auto-route flag: %v\n", err)
+			return
+		}
+
+		var fwmark uint32
+		var routeMgr RouteManager
+		if autoRoute {
+			fwmark = defaultFwmark
+			routeCfg := AutoRouteConfig{
+				InterfaceName: t.name,
+				EnableIPv4:    !tunnelIPv4,
+				EnableIPv6:    !tunnelIPv6,
+				IPv4:          net.ParseIP(config.AppConfig.IPv4),
+				IPv6:          net.ParseIP(config.AppConfig.IPv6),
+				Fwmark:        fwmark,
+				EndpointIP:    extractEndpointIP(endpoint),
+			}
+			routeMgr = newRouteManager(routeCfg)
+			if routeMgr != nil {
+				if err := routeMgr.Setup(); err != nil {
+					log.Fatalf("Auto-route setup failed: %v", err)
+				}
+				fwmark = uint32(routeCfg.PhysicalIfIndex)
+			} else {
+				log.Println("Warning: --auto-route is not supported on this platform")
+				autoRoute = false
+			}
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
 		hookEnv := map[string]string{
 			"USQUE_MODE":  "nativetun",
 			"USQUE_IFACE": t.name,
@@ -203,7 +252,7 @@ var nativeTunCmd = &cobra.Command{
 			"USQUE_IPV6":  config.AppConfig.IPv6,
 		}
 
-		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
+		go api.MaintainTunnel(ctx, api.MaintainTunnelConfig{
 			TLSConfig:         tlsConfig,
 			KeepalivePeriod:   keepalivePeriod,
 			InitialPacketSize: initialPacketSize,
@@ -219,11 +268,26 @@ var nativeTunCmd = &cobra.Command{
 			OnQUICConnect:     congestionCallback(cmd),
 			Noise:             noiseConfig(cmd),
 			PreNoise:          preNoiseConfig(cmd),
+			Fwmark:            fwmark,
 		})
 
-		log.Println("Tunnel established, you may now set up routing and DNS")
+		if autoRoute {
+			log.Println("Tunnel established with auto-route enabled")
+		} else {
+			log.Println("Tunnel established, you may now set up routing and DNS")
+		}
 
-		select {}
+		sig := <-sigCh
+		log.Printf("Received signal %v, shutting down...", sig)
+		cancel()
+
+		if routeMgr != nil {
+			if err := routeMgr.Cleanup(); err != nil {
+				log.Printf("Warning: route cleanup failed: %v", err)
+			} else {
+				log.Println("Auto-route cleaned up")
+			}
+		}
 	},
 }
 
@@ -243,6 +307,8 @@ func init() {
 	nativeTunCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
 	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom interface name for the TUN interface")
 	nativeTunCmd.Flags().Bool("persist", false, "Linux only: Keep the TUN interface after exit")
+	nativeTunCmd.Flags().Int("tun-fd", 0, "Use an existing TUN file descriptor instead of creating one (Android VpnService)")
+	nativeTunCmd.Flags().Bool("auto-route", false, "Automatically configure routing and DNS for full tunnel proxy (Linux only)")
 	nativeTunCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
 	nativeTunCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
 	addCongestionFlags(nativeTunCmd)

@@ -69,7 +69,7 @@ func dialTunnelErr(t *testing.T, onConnect func(*quic.Conn), preNoise internal.N
 		ctx, tlsCfg,
 		internal.DefaultQuicConfig(30*time.Second, 0),
 		internal.ConnectURI, endpoint, false,
-		onConnect, preNoise,
+		onConnect, preNoise, 0, nil,
 	)
 	if err != nil {
 		if udpConn != nil {

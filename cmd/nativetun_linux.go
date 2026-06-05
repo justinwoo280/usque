@@ -17,6 +17,14 @@ var longDescription = "Expose Warp as a native TUN device that accepts any IP tr
 	" Requires root, tun.ko, and iproute2."
 
 func (t *tunDevice) create() (api.TunnelDevice, error) {
+	if t.tunFd > 0 {
+		log.Printf("Using pre-existing TUN fd: %d (Android VpnService mode)", t.tunFd)
+		if t.name == "" {
+			t.name = "tun-android"
+		}
+		return api.NewFdAdapter(t.tunFd), nil
+	}
+
 	platformSpecificParams := water.PlatformSpecificParams{
 		Name:    t.name,
 		Persist: t.persist,

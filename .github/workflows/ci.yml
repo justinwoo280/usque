@@ -12,12 +12,75 @@ permissions:
   contents: read
 
 jobs:
-  lint-and-test:
-    name: Lint and test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.11.4
+          args: --timeout=5m
+
+  build:
+    name: Build (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: linux
+            arch: arm
+          - os: windows
+            arch: amd64
+          - os: windows
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: freebsd
+            arch: amd64
+          - os: freebsd
+            arch: arm64
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.os }}
+      GOARCH: ${{ matrix.arch }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build -trimpath ./...
+
+      - name: Vet
+        run: go vet ./...
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -30,17 +93,75 @@ jobs:
       - name: Verify modules
         run: go mod verify
 
-      - name: Build
-        run: go build -trimpath ./...
-
-      - name: Vet
-        run: go vet ./...
-
       - name: Test
-        run: go test ./...
+        run: go test -race -coverprofile=coverage.out ./...
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
         with:
-          version: v2.11.4
-          args: --timeout=5m
+          name: coverage
+          path: coverage.out
+
+  mobile:
+    name: Mobile library (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: android
+            goos: linux
+            goarch: arm64
+            cgo: "1"
+            cc: aarch64-linux-gnu-gcc
+          - target: android-x86
+            goos: linux
+            goarch: amd64
+            cgo: "1"
+            cc: x86_64-linux-gnu-gcc
+    env:
+      CGO_ENABLED: ${{ matrix.cgo }}
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CC: ${{ matrix.cc }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install cross-compiler
+        if: matrix.target == 'android'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+
+      - name: Build mobile package
+        run: go build -trimpath ./mobile/...
+
+  e2e:
+    name: E2E test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build E2E tests
+        run: go test -tags e2e -c -o e2e_test ./api/
+
+      - name: Run E2E tests
+        env:
+          USQUE_CONFIG: ${{ secrets.USQUE_CONFIG }}
+        if: env.USQUE_CONFIG != ''
+        run: |
+          echo "$USQUE_CONFIG" > config.json
+          ./e2e_test -test.v -test.timeout 120s

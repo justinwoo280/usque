@@ -100,6 +100,8 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
 //   - connectUri: string - The URI template for the Connect-IP request.
 //   - endpoint: net.Addr - The remote endpoint (*net.UDPAddr for HTTP/3, *net.TCPAddr for HTTP/2).
 //   - useHTTP2: bool - When true, connect over TCP+TLS/HTTP2 instead of QUIC/HTTP3.
+//   - existingUDPConn: *net.UDPConn - Optional pre-created UDP socket (e.g. Android VpnService.protect()'d).
+//     When non-nil, socket creation is skipped and the caller owns the socket lifecycle.
 //
 // Returns:
 //   - *net.UDPConn: The UDP connection used for the QUIC session (nil in HTTP/2 mode).
@@ -107,7 +109,7 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
 //   - *connectip.Conn: The Connect-IP connection instance.
 //   - *http.Response: The response from the Connect-IP handshake.
 //   - error: An error if the connection setup fails.
-func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool, onQUICConnect func(*quic.Conn), preNoise internal.NoiseConfig) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool, onQUICConnect func(*quic.Conn), preNoise internal.NoiseConfig, fwmark uint32, existingUDPConn *net.UDPConn) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
 	template := uritemplate.MustNew(connectUri)
 	additionalHeaders := http.Header{
 		"User-Agent": []string{""},
@@ -145,20 +147,21 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	}
 
 	var udpConn *net.UDPConn
-	var err error
-	if quicEndpoint.IP.To4() == nil {
-		udpConn, err = net.ListenUDP("udp", &net.UDPAddr{
-			IP:   net.IPv6zero,
-			Port: 0,
-		})
+	ownsUDPConn := existingUDPConn == nil
+	if ownsUDPConn {
+		var listenAddr *net.UDPAddr
+		if quicEndpoint.IP.To4() == nil {
+			listenAddr = &net.UDPAddr{IP: net.IPv6zero, Port: 0}
+		} else {
+			listenAddr = &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+		}
+		var err error
+		udpConn, err = listenUDPWithMark(ctx, "udp", listenAddr, fwmark)
+		if err != nil {
+			return udpConn, nil, nil, nil, err
+		}
 	} else {
-		udpConn, err = net.ListenUDP("udp", &net.UDPAddr{
-			IP:   net.IPv4zero,
-			Port: 0,
-		})
-	}
-	if err != nil {
-		return udpConn, nil, nil, nil, err
+		udpConn = existingUDPConn
 	}
 
 	if preNoise.Count > 0 {

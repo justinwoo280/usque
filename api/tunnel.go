@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -144,6 +145,27 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 	return &WaterAdapter{iface: iface}
 }
 
+// FdAdapter wraps a raw file descriptor as a TunnelDevice.
+// Used on Android where the TUN fd is provided by VpnService.
+type FdAdapter struct {
+	file *os.File
+}
+
+func (f *FdAdapter) ReadPacket(buf []byte) (int, error) {
+	return f.file.Read(buf)
+}
+
+func (f *FdAdapter) WritePacket(pkt []byte) error {
+	_, err := f.file.Write(pkt)
+	return err
+}
+
+// NewFdAdapter creates a new FdAdapter from a raw file descriptor.
+// The fd is wrapped in an os.File and will be closed when Close() is called.
+func NewFdAdapter(fd int) TunnelDevice {
+	return &FdAdapter{file: os.NewFile(uintptr(fd), "tun")}
+}
+
 // pumpShutdownGrace bounds how long the supervisor waits for both forwarding
 // pumps to exit after an error before spawning a fresh pair. A device-side
 // pump may still be parked in a blocking TUN read during this window; the
@@ -182,6 +204,14 @@ type MaintainTunnelConfig struct {
 	// Packets are sent through the same socket used for QUIC, ensuring matching
 	// source port for flow-level obfuscation.
 	PreNoise internal.NoiseConfig
+	// Fwmark is applied via SO_MARK on the QUIC UDP socket. Used by auto-route
+	// to bypass the tunnel routing rules for the MASQUE client's own traffic.
+	// When 0, no mark is set.
+	Fwmark uint32
+	// UDPConn is an optional pre-created UDP socket. When non-nil, ConnectTunnel
+	// skips socket creation and uses this one instead (e.g. Android VpnService.protect()'d).
+	// The caller owns the socket lifecycle; MaintainTunnel will NOT close it.
+	UDPConn *net.UDPConn
 }
 
 // cloneHookEnv returns a shallow copy of src so concurrent hook invocations
@@ -265,6 +295,8 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			cfg.UseHTTP2,
 			cfg.OnQUICConnect,
 			cfg.PreNoise,
+			cfg.Fwmark,
+			cfg.UDPConn,
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
@@ -274,7 +306,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			if tr != nil {
 				_ = tr.Close()
 			}
-			if udpConn != nil {
+			if udpConn != nil && cfg.UDPConn == nil {
 				_ = udpConn.Close()
 			}
 			if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
@@ -288,7 +320,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			if tr != nil {
 				_ = tr.Close()
 			}
-			if udpConn != nil {
+			if udpConn != nil && cfg.UDPConn == nil {
 				_ = udpConn.Close()
 			}
 			if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
@@ -412,7 +444,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		if tr != nil {
 			_ = tr.Close()
 		}
-		if udpConn != nil {
+		if udpConn != nil && cfg.UDPConn == nil {
 			_ = udpConn.Close()
 		}
 		if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {

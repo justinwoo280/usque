@@ -119,6 +119,22 @@ builds:
       - "-X github.com/Diniboy1123/usque/cmd.commit={{.Commit}}"
       - "-X github.com/Diniboy1123/usque/cmd.date={{.Date}}"
 
+  - id: freebsd
+    goos:
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - "-s -w"
+      - "-X github.com/Diniboy1123/usque/cmd.version={{.Tag}}"
+      - "-X github.com/Diniboy1123/usque/cmd.commit={{.Commit}}"
+      - "-X github.com/Diniboy1123/usque/cmd.date={{.Date}}"
+
 archives:
   - formats:
     - zip
