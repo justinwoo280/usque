@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls /root/usque/.golangci* 2>/dev/null; ls /root/usque/golangci* 2>/dev/null)"
-    ]
-  }
-}
