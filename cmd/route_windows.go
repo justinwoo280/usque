@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/netip"
+	"os/exec"
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
@@ -55,13 +55,10 @@ func (m *windowsRouteManager) Setup() error {
 	if err := m.setupDNS(); err != nil {
 		log.Printf("Warning: DNS setup failed: %v", err)
 	}
-	if err := m.setupInterface(); err != nil {
-		return fmt.Errorf("setup interface: %w", err)
-	}
 	if err := flushResolverCache(); err != nil {
 		log.Printf("Warning: failed to flush DNS cache: %v", err)
 	}
-	log.Println("Auto-route enabled (Windows): metric=0")
+	log.Println("Auto-route enabled (Windows)")
 	return nil
 }
 
@@ -86,63 +83,48 @@ func (m *windowsRouteManager) setupDNS() error {
 		return nil
 	}
 
-	var dns4, dns6 []netip.Addr
+	var dns4, dns6 []string
 	for _, dns := range m.cfg.DNSServers {
-		addr, ok := netip.AddrFromSlice(dns)
-		if !ok {
-			continue
-		}
 		if dns.To4() != nil {
-			dns4 = append(dns4, addr)
+			dns4 = append(dns4, dns.String())
 		} else {
-			dns6 = append(dns6, addr)
+			dns6 = append(dns6, dns.String())
 		}
 	}
 
+	// Use netsh instead of luid.SetDNS: Wintun adapters don't always expose
+	// the registry key that winipcfg expects (ERROR_FILE_NOT_FOUND).
 	if m.cfg.EnableIPv4 && len(dns4) > 0 {
-		if err := m.luid.SetDNS(windows.AF_INET, dns4, nil); err != nil {
-			return fmt.Errorf("set IPv4 DNS: %w", err)
+		args := []string{"interface", "ipv4", "set", "dnsservers",
+			fmt.Sprintf("name=\"%s\"", m.cfg.InterfaceName),
+			"static", dns4[0], "primary"}
+		if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("set primary IPv4 DNS: %s: %w", string(out), err)
+		}
+		for _, d := range dns4[1:] {
+			args := []string{"interface", "ipv4", "add", "dnsservers",
+				fmt.Sprintf("name=\"%s\"", m.cfg.InterfaceName),
+				d, "index=2"}
+			if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
+				log.Printf("Warning: add secondary IPv4 DNS %s failed: %s: %v", d, out, err)
+			}
 		}
 	}
+
 	if m.cfg.EnableIPv6 && len(dns6) > 0 {
-		if err := m.luid.SetDNS(windows.AF_INET6, dns6, nil); err != nil {
-			return fmt.Errorf("set IPv6 DNS: %w", err)
+		args := []string{"interface", "ipv6", "set", "dnsservers",
+			fmt.Sprintf("interface=\"%s\"", m.cfg.InterfaceName),
+			"static", dns6[0], "primary"}
+		if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("set primary IPv6 DNS: %s: %w", string(out), err)
 		}
-	}
-	return nil
-}
-
-func (m *windowsRouteManager) setupInterface() error {
-	if m.cfg.EnableIPv4 {
-		ipif, err := m.luid.IPInterface(windows.AF_INET)
-		if err != nil {
-			return fmt.Errorf("get IPv4 interface: %w", err)
-		}
-		ipif.ForwardingEnabled = true
-		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
-		ipif.DadTransmits = 0
-		ipif.ManagedAddressConfigurationSupported = false
-		ipif.OtherStatefulConfigurationSupported = false
-		ipif.UseAutomaticMetric = false
-		ipif.Metric = 0
-		if err := ipif.Set(); err != nil {
-			return fmt.Errorf("set IPv4 interface: %w", err)
-		}
-	}
-
-	if m.cfg.EnableIPv6 {
-		ipif, err := m.luid.IPInterface(windows.AF_INET6)
-		if err != nil {
-			return fmt.Errorf("get IPv6 interface: %w", err)
-		}
-		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
-		ipif.DadTransmits = 0
-		ipif.ManagedAddressConfigurationSupported = false
-		ipif.OtherStatefulConfigurationSupported = false
-		ipif.UseAutomaticMetric = false
-		ipif.Metric = 0
-		if err := ipif.Set(); err != nil {
-			return fmt.Errorf("set IPv6 interface: %w", err)
+		for _, d := range dns6[1:] {
+			args := []string{"interface", "ipv6", "add", "dnsservers",
+				fmt.Sprintf("interface=\"%s\"", m.cfg.InterfaceName),
+				d, "index=2"}
+			if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
+				log.Printf("Warning: add secondary IPv6 DNS %s failed: %s: %v", d, out, err)
+			}
 		}
 	}
 	return nil
