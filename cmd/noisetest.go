@@ -86,7 +86,7 @@ Examples:
 			return
 		}
 
-		endpoint, err := config.SelectEndpointFromConfig(false, useIPv6, connectPort)
+		endpoint, err := config.SelectEndpointFromConfig(&config.AppConfig, false, useIPv6, connectPort)
 		if err != nil {
 			cmd.Printf("Failed to select endpoint: %v\n", err)
 			return

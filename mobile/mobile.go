@@ -72,7 +72,7 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 		return "failed to prepare TLS: " + err.Error()
 	}
 
-	endpoint, err := config.SelectEndpointFromConfig(ob.UseHTTP2, ob.UseIPv6, ob.Port)
+	endpoint, err := config.SelectEndpointFromConfig(acct, ob.UseHTTP2, ob.UseIPv6, ob.Port)
 	if err != nil {
 		return "failed to select endpoint: " + err.Error()
 	}

@@ -26,22 +26,22 @@ func WarnInsecure() {
 
 // SelectEndpointFromConfig returns a protocol-appropriate remote endpoint:
 // TCP for HTTP/2 mode and UDP for HTTP/3 mode.
-func SelectEndpointFromConfig(useHTTP2 bool, useIPv6 bool, port int) (net.Addr, error) {
+func SelectEndpointFromConfig(acct *AccountConfig, useHTTP2 bool, useIPv6 bool, port int) (net.Addr, error) {
 	if useHTTP2 {
 		if useIPv6 {
-			if AppConfig.EndpointH2V6 == "" {
+			if acct.EndpointH2V6 == "" {
 				return nil, fmt.Errorf("--http2 with --ipv6 requires config endpoint_h2_v6 to be set; see %s", HTTP2WikiURL)
 			}
 
-			ip := net.ParseIP(AppConfig.EndpointH2V6)
+			ip := net.ParseIP(acct.EndpointH2V6)
 			if ip == nil {
-				return nil, fmt.Errorf("invalid endpoint_h2_v6 value %q; see %s", AppConfig.EndpointH2V6, HTTP2WikiURL)
+				return nil, fmt.Errorf("invalid endpoint_h2_v6 value %q; see %s", acct.EndpointH2V6, HTTP2WikiURL)
 			}
 
 			return &net.TCPAddr{IP: ip, Port: port}, nil
 		}
 
-		v4 := AppConfig.EndpointH2V4
+		v4 := acct.EndpointH2V4
 		if v4 == "" {
 			v4 = DefaultEndpointH2V4
 		}
@@ -55,16 +55,16 @@ func SelectEndpointFromConfig(useHTTP2 bool, useIPv6 bool, port int) (net.Addr, 
 	}
 
 	if useIPv6 {
-		ip := net.ParseIP(AppConfig.EndpointV6)
+		ip := net.ParseIP(acct.EndpointV6)
 		if ip == nil {
-			return nil, fmt.Errorf("invalid endpoint_v6 value %q", AppConfig.EndpointV6)
+			return nil, fmt.Errorf("invalid endpoint_v6 value %q", acct.EndpointV6)
 		}
 		return &net.UDPAddr{IP: ip, Port: port}, nil
 	}
 
-	ip := net.ParseIP(AppConfig.EndpointV4)
+	ip := net.ParseIP(acct.EndpointV4)
 	if ip == nil {
-		return nil, fmt.Errorf("invalid endpoint_v4 value %q", AppConfig.EndpointV4)
+		return nil, fmt.Errorf("invalid endpoint_v4 value %q", acct.EndpointV4)
 	}
 	return &net.UDPAddr{IP: ip, Port: port}, nil
 }

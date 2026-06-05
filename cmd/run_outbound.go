@@ -49,7 +49,7 @@ func buildOutbound(fc *config.FullConfig) (*outboundBundle, error) {
 		return nil, fmt.Errorf("prepare TLS config: %w", err)
 	}
 
-	endpoint, err := config.SelectEndpointFromConfig(ob.UseHTTP2, ob.UseIPv6, ob.Port)
+	endpoint, err := config.SelectEndpointFromConfig(acct, ob.UseHTTP2, ob.UseIPv6, ob.Port)
 	if err != nil {
 		return nil, fmt.Errorf("select endpoint: %w", err)
 	}
