@@ -129,7 +129,7 @@ func sendNoise(endpoint *net.UDPAddr, count, minSize, maxSize int, delayMin, del
 		log.Printf("Noise: failed to dial UDP: %v", err)
 		return
 	}
-	defer udpConn.Close()
+	defer func() { _ = udpConn.Close() }()
 
 	log.Printf("Noise: sending %d packets (size [%d,%d]) to %s ...", count, minSize, maxSize, endpoint)
 
@@ -181,7 +181,7 @@ func testHandshake(tlsConfig *tls.Config, endpoint *net.UDPAddr, timeout time.Du
 	if err != nil {
 		return false, time.Since(start), fmt.Sprintf("ListenUDP failed: %v", err)
 	}
-	defer udpConn.Close()
+	defer func() { _ = udpConn.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -197,7 +197,7 @@ func testHandshake(tlsConfig *tls.Config, endpoint *net.UDPAddr, timeout time.Du
 	if err != nil {
 		return false, time.Since(start), fmt.Sprintf("QUIC dial failed (%s): %v", quicElapsed, err)
 	}
-	defer conn.CloseWithError(0, "test done")
+	defer func() { _ = conn.CloseWithError(0, "test done") }()
 
 	tr := &http3.Transport{
 		EnableDatagrams: true,
@@ -206,7 +206,7 @@ func testHandshake(tlsConfig *tls.Config, endpoint *net.UDPAddr, timeout time.Du
 		},
 		DisableCompression: true,
 	}
-	defer tr.Close()
+	defer func() { _ = tr.Close() }()
 
 	hconn := tr.NewClientConn(conn)
 
@@ -221,7 +221,7 @@ func testHandshake(tlsConfig *tls.Config, endpoint *net.UDPAddr, timeout time.Du
 	if err != nil {
 		return false, time.Since(start), fmt.Sprintf("QUIC=%s, Connect-IP failed (%s): %v", quicElapsed, connectElapsed, err)
 	}
-	defer ipConn.Close()
+	defer func() { _ = ipConn.Close() }()
 
 	if rsp.StatusCode != 200 {
 		return false, time.Since(start), fmt.Sprintf("QUIC=%s, Connect-IP=%s, status=%s", quicElapsed, connectElapsed, rsp.Status)

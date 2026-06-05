@@ -80,7 +80,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     env:
-      CGO_ENABLED: "0"
+      CGO_ENABLED: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -145,7 +145,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     env:
-      CGO_ENABLED: "0"
+      CGO_ENABLED: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

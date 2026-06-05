@@ -51,14 +51,6 @@ func (s *tunnelStatus) setState(st tunnelState) {
 	s.state.Store(int32(st))
 }
 
-func (s *tunnelStatus) setError(msg string) {
-	s.state.Store(int32(stateError))
-	s.errMsg.Store(msg)
-}
-
-func (s *tunnelStatus) addSent(n int64) { s.bytesSent.Add(n) }
-func (s *tunnelStatus) addRecv(n int64) { s.bytesRecv.Add(n) }
-
 func (s *tunnelStatus) markStarted() {
 	s.startedAt.Store(time.Now().Unix())
 }

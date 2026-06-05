@@ -238,7 +238,6 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 		rule.Table = m.cfg.TableIndex
 		rule.Family = unix.AF_INET6
 		rules = append(rules, rule)
-		priority++
 	}
 
 	return rules
