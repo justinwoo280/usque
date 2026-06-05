@@ -22,6 +22,16 @@ func SetIPv4Address(ifaceName, ipAddr, mask string) error {
 	return nil
 }
 
+func SetIPv4Peer(ifaceName, peerAddr string) error {
+	cmd := exec.Command("netsh", "interface", "ipv4", "add", "route",
+		"0.0.0.0/0", fmt.Sprintf("name=\"%s\"", ifaceName), peerAddr, "metric=1")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s", output)
+	}
+	log.Println("IPv4 peer gateway set successfully:", peerAddr)
+	return nil
+}
+
 func SetIPv6Address(ifaceName, ipAddr, mask string) error {
 	cmd := exec.Command("netsh", "interface", "ipv6", "set", "address",
 		fmt.Sprintf("interface=\"%s\"", ifaceName),
@@ -33,6 +43,16 @@ func SetIPv6Address(ifaceName, ipAddr, mask string) error {
 	}
 
 	log.Println("IPv6 address set successfully:", ipAddr)
+	return nil
+}
+
+func SetIPv6Peer(ifaceName, peerAddr string) error {
+	cmd := exec.Command("netsh", "interface", "ipv6", "add", "route",
+		"::/0", fmt.Sprintf("interface=\"%s\"", ifaceName), peerAddr, "metric=1")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s", output)
+	}
+	log.Println("IPv6 peer gateway set successfully:", peerAddr)
 	return nil
 }
 

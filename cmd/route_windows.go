@@ -74,29 +74,10 @@ func (m *windowsRouteManager) Cleanup() error {
 }
 
 func (m *windowsRouteManager) setupRoutes() error {
-	var routes []*winipcfg.RouteData
-
-	if m.cfg.EnableIPv4 {
-		routes = append(routes, &winipcfg.RouteData{
-			Destination: netip.MustParsePrefix("0.0.0.0/0"),
-			NextHop:     netip.IPv4Unspecified(),
-			Metric:      0,
-		})
-	}
-
-	if m.cfg.EnableIPv6 {
-		routes = append(routes, &winipcfg.RouteData{
-			Destination: netip.MustParsePrefix("::/0"),
-			NextHop:     netip.IPv6Unspecified(),
-			Metric:      0,
-		})
-	}
-
-	if len(routes) > 0 {
-		if err := m.luid.SetRoutes(routes); err != nil {
-			return fmt.Errorf("set routes: %w", err)
-		}
-	}
+	// Default routes are already installed by internal.SetIPv4Peer / SetIPv6Peer
+	// (netsh) when the Wintun adapter was brought up, with the peer gateway as
+	// next-hop. Calling luid.SetRoutes with NextHop=0.0.0.0/:: on a Wintun
+	// point-to-point adapter fails with "Element not found", so skip it here.
 	return nil
 }
 
