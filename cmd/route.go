@@ -5,26 +5,25 @@ import "net"
 const (
 	defaultRouteTableIndex = 2022
 	defaultRouteRuleIndex  = 9000
-	defaultFwmark          = 0x2023
 )
 
+// RouteManager handles platform-specific routing setup for the TUN inbound.
 type RouteManager interface {
 	Setup() error
 	Cleanup() error
 }
 
+// AutoRouteConfig holds parameters for automatic route/DNS configuration.
 type AutoRouteConfig struct {
-	InterfaceName   string
-	IPv4            net.IP
-	IPv6            net.IP
-	EnableIPv4      bool
-	EnableIPv6      bool
-	DNSServers      []net.IP
-	TableIndex      int
-	RuleIndex       int
-	Fwmark          uint32
-	PhysicalIfIndex int
-	EndpointIP      net.IP
+	InterfaceName string
+	IPv4          net.IP
+	IPv6          net.IP
+	EnableIPv4    bool
+	EnableIPv6    bool
+	DNSServers    []net.IP
+	TableIndex    int
+	RuleIndex     int
+	EndpointIP    net.IP
 }
 
 func defaultDNSServers() []net.IP {
@@ -51,9 +50,6 @@ func (c *AutoRouteConfig) applyDefaults() {
 	}
 	if c.RuleIndex == 0 {
 		c.RuleIndex = defaultRouteRuleIndex
-	}
-	if c.Fwmark == 0 {
-		c.Fwmark = defaultFwmark
 	}
 	if len(c.DNSServers) == 0 {
 		c.DNSServers = defaultDNSServers()

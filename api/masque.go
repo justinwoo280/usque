@@ -109,7 +109,7 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
 //   - *connectip.Conn: The Connect-IP connection instance.
 //   - *http.Response: The response from the Connect-IP handshake.
 //   - error: An error if the connection setup fails.
-func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool, onQUICConnect func(*quic.Conn), preNoise internal.NoiseConfig, fwmark uint32, existingUDPConn *net.UDPConn) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool, onQUICConnect func(*quic.Conn), preNoise internal.NoiseConfig, updater *InterfaceUpdater, existingUDPConn *net.UDPConn) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
 	template := uritemplate.MustNew(connectUri)
 	additionalHeaders := http.Header{
 		"User-Agent": []string{""},
@@ -156,7 +156,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 			listenAddr = &net.UDPAddr{IP: net.IPv4zero, Port: 0}
 		}
 		var err error
-		udpConn, err = listenUDPWithMark(ctx, "udp", listenAddr, fwmark)
+		udpConn, err = listenUDPWithBind(ctx, "udp", listenAddr, updater)
 		if err != nil {
 			return udpConn, nil, nil, nil, err
 		}

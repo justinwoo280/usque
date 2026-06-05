@@ -5,6 +5,7 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -12,6 +13,7 @@ import (
 type freebsdRouteManager struct {
 	cfg            AutoRouteConfig
 	defaultGateway string
+	dnsBackup      string
 }
 
 func newRouteManager(cfg AutoRouteConfig) RouteManager {
@@ -33,7 +35,9 @@ func (m *freebsdRouteManager) Setup() error {
 			mask = "/128"
 		}
 		if err := runRoute("add", m.cfg.EndpointIP.String()+mask, gw); err != nil {
-			return fmt.Errorf("add endpoint bypass route: %w", err)
+			log.Printf("Warning: endpoint bypass failed: %v", err)
+		} else {
+			log.Printf("Endpoint bypass: %s%s via %s", m.cfg.EndpointIP, mask, gw)
 		}
 	}
 
@@ -53,6 +57,10 @@ func (m *freebsdRouteManager) Setup() error {
 		if err := runRoute("add", "8000::/1", "-interface", m.cfg.InterfaceName); err != nil {
 			return fmt.Errorf("add 8000::/1: %w", err)
 		}
+	}
+
+	if err := m.setupDNS(); err != nil {
+		log.Printf("Warning: DNS setup failed: %v (you may need to configure DNS manually)", err)
 	}
 
 	log.Println("Auto-route enabled (FreeBSD)")
@@ -76,7 +84,52 @@ func (m *freebsdRouteManager) Cleanup() error {
 		_ = runRoute("delete", "::/1", "-interface", m.cfg.InterfaceName)
 		_ = runRoute("delete", "8000::/1", "-interface", m.cfg.InterfaceName)
 	}
+
+	m.cleanupDNS()
 	return nil
+}
+
+func (m *freebsdRouteManager) setupDNS() error {
+	if len(m.cfg.DNSServers) == 0 {
+		return nil
+	}
+
+	const resolvConf = "/etc/resolv.conf"
+	backupPath := resolvConf + ".usque.bak"
+
+	data, err := os.ReadFile(resolvConf)
+	if err == nil {
+		if err := os.WriteFile(backupPath, data, 0644); err != nil {
+			log.Printf("Warning: failed to backup %s: %v", resolvConf, err)
+		} else {
+			m.dnsBackup = backupPath
+		}
+	}
+
+	var content string
+	for _, dns := range m.cfg.DNSServers {
+		content += fmt.Sprintf("nameserver %s\n", dns.String())
+	}
+
+	if err := os.WriteFile(resolvConf, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write %s: %w", resolvConf, err)
+	}
+
+	log.Printf("DNS configured: %s", resolvConf)
+	return nil
+}
+
+func (m *freebsdRouteManager) cleanupDNS() {
+	if m.dnsBackup != "" {
+		data, err := os.ReadFile(m.dnsBackup)
+		if err == nil {
+			if err := os.WriteFile("/etc/resolv.conf", data, 0644); err != nil {
+				log.Printf("Warning: failed to restore /etc/resolv.conf: %v", err)
+			}
+		}
+		_ = os.Remove(m.dnsBackup)
+		m.dnsBackup = ""
+	}
 }
 
 func findFreeBSDGateway() (string, error) {

@@ -11,6 +11,8 @@ import (
 	"github.com/Diniboy1123/usque/api"
 	"github.com/Diniboy1123/usque/config"
 	"github.com/Diniboy1123/usque/internal"
+	"github.com/Diniboy1123/usque/internal/congestion"
+	"github.com/Diniboy1123/usque/internal/congestion/bbr"
 	"github.com/apernet/quic-go"
 )
 
@@ -31,11 +33,10 @@ type tunnelManager struct {
 // Parameters:
 //   - tunFd: VpnService TUN file descriptor
 //   - udpFd: pre-created, VpnService.protect()'d UDP socket fd
-//   - configJSON: usque config.json contents as string
+//   - configJSON: usque config JSON contents (FullConfig or legacy flat format)
 //
 // Returns "" on success, error string on failure.
 func StartTunnel(tunFd int, udpFd int, configJSON string) string {
-	var startErr string
 	mgrOnce.Do(func() {
 		mgr = &tunnelManager{
 			status: newTunnelStatus(),
@@ -46,16 +47,17 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 		return "tunnel already running"
 	}
 
-	if err := json.Unmarshal([]byte(configJSON), &config.AppConfig); err != nil {
+	fc, err := parseConfigJSON(configJSON)
+	if err != nil {
 		return "failed to parse config: " + err.Error()
 	}
-	config.ConfigLoaded = true
 
-	privKey, err := config.AppConfig.GetEcPrivateKey()
+	acct := &fc.Account
+	privKey, err := acct.GetEcPrivateKey()
 	if err != nil {
 		return "failed to get private key: " + err.Error()
 	}
-	peerPubKey, err := config.AppConfig.GetEcEndpointPublicKey()
+	peerPubKey, err := acct.GetEcEndpointPublicKey()
 	if err != nil {
 		return "failed to get public key: " + err.Error()
 	}
@@ -63,26 +65,65 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	if err != nil {
 		return "failed to generate cert: " + err.Error()
 	}
-	tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, internal.ConnectSNI, false)
+
+	ob := &fc.Outbound.Settings
+	tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, ob.SNIAddress, ob.Insecure)
 	if err != nil {
 		return "failed to prepare TLS: " + err.Error()
 	}
 
-	endpoint, err := config.SelectEndpointFromConfig(false, false, 443)
+	endpoint, err := config.SelectEndpointFromConfig(ob.UseHTTP2, ob.UseIPv6, ob.Port)
 	if err != nil {
 		return "failed to select endpoint: " + err.Error()
 	}
 
-	udpAddr, ok := endpoint.(*net.UDPAddr)
-	if !ok {
-		return "endpoint is not UDP (HTTP/2 not supported in mobile mode)"
+	var udpAddr *net.UDPAddr
+	var tcpAddr *net.TCPAddr
+	if ob.UseHTTP2 {
+		tcpAddr, _ = endpoint.(*net.TCPAddr)
+		if tcpAddr == nil {
+			return "endpoint is not TCP"
+		}
+	} else {
+		udpAddr, _ = endpoint.(*net.UDPAddr)
+		if udpAddr == nil {
+			return "endpoint is not UDP"
+		}
 	}
 
 	tunDev := wrapTunFd(tunFd)
 	udpConn := wrapUDPConn(udpFd)
-	if udpConn == nil {
+	if udpConn == nil && !ob.UseHTTP2 {
 		return "failed to wrap UDP fd"
 	}
+
+	var onQUICConnect func(*quic.Conn)
+	if err := ob.Congestion.Validate(); err == nil {
+		switch ob.Congestion.Type {
+		case "brutal":
+			onQUICConnect = func(conn *quic.Conn) {
+				conn.SetCongestionControl(congestion.NewBrutalSender(ob.Congestion.BrutalBPS))
+				mgr.status.setState(stateConnected)
+			}
+		case "bbr":
+			profile, _ := bbr.ParseProfile(ob.Congestion.BBRProfile)
+			onQUICConnect = func(conn *quic.Conn) {
+				conn.SetCongestionControl(bbr.NewBbrSender(
+					bbr.DefaultClock{},
+					bbr.GetInitialPacketSize(conn.RemoteAddr()),
+					profile,
+				))
+				mgr.status.setState(stateConnected)
+			}
+		default:
+			onQUICConnect = func(conn *quic.Conn) {
+				mgr.status.setState(stateConnected)
+			}
+		}
+	}
+
+	keepalive := config.ParseDuration(ob.KeepalivePeriod, 30*time.Second)
+	reconnect := config.ParseDuration(ob.ReconnectDelay, 1*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	mgr.ctx = ctx
@@ -96,22 +137,37 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 		defer close(mgr.done)
 		api.MaintainTunnel(ctx, api.MaintainTunnelConfig{
 			TLSConfig:         tlsConfig,
-			KeepalivePeriod:   30 * time.Second,
-			Endpoint:          udpAddr,
+			KeepalivePeriod:   keepalive,
+			InitialPacketSize: ob.InitialPacketSize,
+			Endpoint:          endpoint,
 			Device:            tunDev,
 			MTU:               1280,
-			ReconnectDelay:    1 * time.Second,
+			ReconnectDelay:    reconnect,
 			AlwaysReconnect:   true,
-			Fwmark:            0,
+			UseHTTP2:          ob.UseHTTP2,
 			UDPConn:           udpConn,
-			OnQUICConnect: func(conn *quic.Conn) {
-				mgr.status.setState(stateConnected)
-			},
+			OnQUICConnect:     onQUICConnect,
+			Noise:             ob.Noise.ToNoiseConfig(),
+			PreNoise:          ob.PreNoise.ToNoiseConfig(),
 		})
 	}()
 
 	log.Println("mobile: tunnel engine started")
-	return startErr
+	return ""
+}
+
+// parseConfigJSON parses FullConfig from JSON string, with legacy flat format fallback.
+func parseConfigJSON(jsonStr string) (*config.FullConfig, error) {
+	var fc config.FullConfig
+	if err := json.Unmarshal([]byte(jsonStr), &fc); err == nil && fc.Inbound.Type != "" {
+		return &fc, nil
+	}
+
+	var acct config.AccountConfig
+	if err := json.Unmarshal([]byte(jsonStr), &acct); err != nil {
+		return nil, err
+	}
+	return config.NewDefaultFullConfig(acct), nil
 }
 
 // StopTunnel stops the running tunnel engine and releases resources.
@@ -131,13 +187,6 @@ func StopTunnel() {
 }
 
 // GetStatus returns a JSON string describing the current tunnel state.
-//
-// Example responses:
-//
-//	{"state":"connected","bytes_sent":12345,"bytes_recv":67890,"uptime":"5m30s"}
-//	{"state":"connecting","bytes_sent":0,"bytes_recv":0,"uptime":""}
-//	{"state":"error","message":"login failed","bytes_sent":0,"bytes_recv":0,"uptime":""}
-//	{"state":"stopped","bytes_sent":0,"bytes_recv":0,"uptime":""}
 func GetStatus() string {
 	if mgr == nil {
 		return `{"state":"stopped","bytes_sent":0,"bytes_recv":0,"uptime":""}`

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os/exec"
+	"strings"
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
@@ -24,9 +26,8 @@ func flushResolverCache() error {
 }
 
 type windowsRouteManager struct {
-	cfg   AutoRouteConfig
-	luid  winipcfg.LUID
-	ifIdx int
+	cfg  AutoRouteConfig
+	luid winipcfg.LUID
 }
 
 func newRouteManager(cfg AutoRouteConfig) RouteManager {
@@ -39,42 +40,177 @@ func (m *windowsRouteManager) Setup() error {
 	if err != nil {
 		return fmt.Errorf("find interface %s: %w", m.cfg.InterfaceName, err)
 	}
-	m.ifIdx = iface.Index
 	m.luid = winipcfg.LUID(iface.Index)
 
-	physIdx, err := findPhysicalInterfaceIndex()
+	gw, gwIface, err := findDefaultGateway()
 	if err != nil {
-		return fmt.Errorf("find physical interface: %w", err)
+		log.Printf("Warning: failed to find default gateway: %v (endpoint bypass may not work)", err)
 	}
-	m.cfg.PhysicalIfIndex = physIdx
-	log.Printf("Physical interface index: %d (for QUIC socket binding)", physIdx)
+
+	if m.cfg.EndpointIP != nil && gw != "" {
+		if err := addEndpointBypass(m.cfg.EndpointIP, gw, gwIface); err != nil {
+			log.Printf("Warning: endpoint bypass failed: %v", err)
+		} else {
+			log.Printf("Endpoint bypass: %s via %s", m.cfg.EndpointIP, gw)
+		}
+	}
 
 	if err := m.setupRoutes(); err != nil {
 		return fmt.Errorf("setup routes: %w", err)
 	}
+
+	if err := m.setupIPInterface(); err != nil {
+		return fmt.Errorf("setup IP interface: %w", err)
+	}
+
 	if err := m.setupDNS(); err != nil {
 		log.Printf("Warning: DNS setup failed: %v", err)
 	}
+
 	if err := flushResolverCache(); err != nil {
 		log.Printf("Warning: failed to flush DNS cache: %v", err)
 	}
-	log.Println("Auto-route enabled (Windows)")
+
+	log.Printf("Auto-route enabled (Windows): table=%d, dns=%d servers", m.cfg.TableIndex, len(m.cfg.DNSServers))
 	return nil
 }
 
 func (m *windowsRouteManager) Cleanup() error {
-	if err := m.cleanupRoutes(); err != nil {
-		log.Printf("Warning: route cleanup failed: %v", err)
+	if m.cfg.EndpointIP != nil {
+		mask := "255.255.255.255"
+		if m.cfg.EndpointIP.To4() == nil {
+			mask = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+		}
+		_ = exec.Command("route", "delete", m.cfg.EndpointIP.String(), "mask", mask).Run()
 	}
-	_ = flushResolverCache()
+
+	if m.cfg.EnableIPv4 {
+		_ = m.luid.FlushRoutes(windows.AF_INET)
+	}
+	if m.cfg.EnableIPv6 {
+		_ = m.luid.FlushRoutes(windows.AF_INET6)
+	}
+
+	if err := flushResolverCache(); err != nil {
+		log.Printf("Warning: failed to flush DNS cache: %v", err)
+	}
+	return nil
+}
+
+func findDefaultGateway() (string, string, error) {
+	routes, err := winipcfg.GetIPForwardTable2(windows.AF_INET)
+	if err != nil {
+		return "", "", fmt.Errorf("get routes: %w", err)
+	}
+
+	for _, route := range routes {
+		if route.DestinationPrefix.Prefix().Bits() == 0 &&
+			route.DestinationPrefix.Prefix().Addr().Is4() {
+			nextHop := route.NextHop.Addr().String()
+			ifIdx := route.InterfaceIndex
+
+			ifaces, err := net.Interfaces()
+			if err != nil {
+				return nextHop, "", nil
+			}
+			for _, iface := range ifaces {
+				if iface.Index == int(ifIdx) {
+					return nextHop, iface.Name, nil
+				}
+			}
+			return nextHop, "", nil
+		}
+	}
+
+	return "", "", fmt.Errorf("no default route found")
+}
+
+func addEndpointBypass(endpointIP net.IP, gateway, gwIface string) error {
+	mask := "255.255.255.255"
+	if endpointIP.To4() == nil {
+		mask = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+	}
+
+	args := []string{"add", endpointIP.String(), "mask", mask, gateway, "metric", "1"}
+	if gwIface != "" {
+		iface, err := net.InterfaceByName(gwIface)
+		if err == nil {
+			args = append(args, "if", fmt.Sprintf("%d", iface.Index))
+		}
+	}
+
+	out, err := exec.Command("route", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("route add: %s: %w", strings.TrimSpace(string(out)), err)
+	}
 	return nil
 }
 
 func (m *windowsRouteManager) setupRoutes() error {
-	// Default routes are already installed by internal.SetIPv4Peer / SetIPv6Peer
-	// (netsh) when the Wintun adapter was brought up, with the peer gateway as
-	// next-hop. Calling luid.SetRoutes with NextHop=0.0.0.0/:: on a Wintun
-	// point-to-point adapter fails with "Element not found", so skip it here.
+	var routes []winipcfg.RouteData
+
+	if m.cfg.EnableIPv4 {
+		routes = append(routes, winipcfg.RouteData{
+			Destination: netip.MustParsePrefix("0.0.0.0/0"),
+			NextHop:     netip.IPv4Unspecified(),
+			Metric:      0,
+		})
+	}
+
+	if m.cfg.EnableIPv6 {
+		routes = append(routes, winipcfg.RouteData{
+			Destination: netip.MustParsePrefix("::/0"),
+			NextHop:     netip.IPv6Unspecified(),
+			Metric:      0,
+		})
+	}
+
+	if len(routes) > 0 {
+		routePtrs := make([]*winipcfg.RouteData, len(routes))
+		for i := range routes {
+			routePtrs[i] = &routes[i]
+		}
+		if err := m.luid.SetRoutes(routePtrs); err != nil {
+			return fmt.Errorf("set default routes: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (m *windowsRouteManager) setupIPInterface() error {
+	if m.cfg.EnableIPv4 {
+		ipif, err := m.luid.IPInterface(windows.AF_INET)
+		if err != nil {
+			return fmt.Errorf("get IPv4 interface: %w", err)
+		}
+		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
+		ipif.DadTransmits = 0
+		ipif.ManagedAddressConfigurationSupported = false
+		ipif.OtherStatefulConfigurationSupported = false
+		ipif.UseAutomaticMetric = false
+		ipif.Metric = 0
+		if err := ipif.Set(); err != nil {
+			return fmt.Errorf("set IPv4 interface: %w", err)
+		}
+	}
+
+	if m.cfg.EnableIPv6 {
+		ipif, err := m.luid.IPInterface(windows.AF_INET6)
+		if err != nil {
+			return fmt.Errorf("get IPv6 interface: %w", err)
+		}
+		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
+		ipif.DadTransmits = 0
+		ipif.ManagedAddressConfigurationSupported = false
+		ipif.OtherStatefulConfigurationSupported = false
+		ipif.UseAutomaticMetric = false
+		ipif.Metric = 0
+		if err := ipif.Set(); err != nil {
+			return fmt.Errorf("set IPv6 interface: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -83,72 +219,26 @@ func (m *windowsRouteManager) setupDNS() error {
 		return nil
 	}
 
-	var dns4, dns6 []string
+	var dns4, dns6 []netip.Addr
 	for _, dns := range m.cfg.DNSServers {
 		if dns.To4() != nil {
-			dns4 = append(dns4, dns.String())
+			dns4 = append(dns4, netip.MustParseAddr(dns.String()))
 		} else {
-			dns6 = append(dns6, dns.String())
+			dns6 = append(dns6, netip.MustParseAddr(dns.String()))
 		}
 	}
 
-	// Use netsh instead of luid.SetDNS: Wintun adapters don't always expose
-	// the registry key that winipcfg expects (ERROR_FILE_NOT_FOUND).
 	if m.cfg.EnableIPv4 && len(dns4) > 0 {
-		args := []string{"interface", "ipv4", "set", "dnsservers",
-			fmt.Sprintf("name=\"%s\"", m.cfg.InterfaceName),
-			"static", dns4[0], "primary"}
-		if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
-			return fmt.Errorf("set primary IPv4 DNS: %s: %w", string(out), err)
-		}
-		for _, d := range dns4[1:] {
-			args := []string{"interface", "ipv4", "add", "dnsservers",
-				fmt.Sprintf("name=\"%s\"", m.cfg.InterfaceName),
-				d, "index=2"}
-			if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
-				log.Printf("Warning: add secondary IPv4 DNS %s failed: %s: %v", d, out, err)
-			}
+		if err := m.luid.SetDNS(windows.AF_INET, dns4, nil); err != nil {
+			return fmt.Errorf("set IPv4 DNS: %w", err)
 		}
 	}
 
 	if m.cfg.EnableIPv6 && len(dns6) > 0 {
-		args := []string{"interface", "ipv6", "set", "dnsservers",
-			fmt.Sprintf("interface=\"%s\"", m.cfg.InterfaceName),
-			"static", dns6[0], "primary"}
-		if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
-			return fmt.Errorf("set primary IPv6 DNS: %s: %w", string(out), err)
-		}
-		for _, d := range dns6[1:] {
-			args := []string{"interface", "ipv6", "add", "dnsservers",
-				fmt.Sprintf("interface=\"%s\"", m.cfg.InterfaceName),
-				d, "index=2"}
-			if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
-				log.Printf("Warning: add secondary IPv6 DNS %s failed: %s: %v", d, out, err)
-			}
+		if err := m.luid.SetDNS(windows.AF_INET6, dns6, nil); err != nil {
+			return fmt.Errorf("set IPv6 DNS: %w", err)
 		}
 	}
-	return nil
-}
 
-func (m *windowsRouteManager) cleanupRoutes() error {
-	if m.cfg.EnableIPv4 {
-		_ = m.luid.FlushRoutes(windows.AF_INET)
-	}
-	if m.cfg.EnableIPv6 {
-		_ = m.luid.FlushRoutes(windows.AF_INET6)
-	}
 	return nil
-}
-
-func findPhysicalInterfaceIndex() (int, error) {
-	routes, err := winipcfg.GetIPForwardTable2(windows.AF_INET)
-	if err != nil {
-		return 0, fmt.Errorf("get IPv4 routes: %w", err)
-	}
-	for _, route := range routes {
-		if route.DestinationPrefix.PrefixLength == 0 {
-			return int(route.InterfaceIndex), nil
-		}
-	}
-	return 0, fmt.Errorf("no default IPv4 route found")
 }

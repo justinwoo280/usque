@@ -20,9 +20,11 @@ import (
 
 func loadE2EConfig(t *testing.T) {
 	t.Helper()
-	if err := config.LoadConfig("../config.json"); err != nil {
+	fc, err := config.LoadFullConfig("../config.json")
+	if err != nil {
 		t.Skipf("config.json not available, skipping E2E: %v", err)
 	}
+	config.AppConfig = fc.Account
 	if config.AppConfig.EndpointV4 == "" {
 		t.Skip("endpoint_v4 is empty, skipping")
 	}
@@ -69,7 +71,7 @@ func dialTunnelErr(t *testing.T, onConnect func(*quic.Conn), preNoise internal.N
 		ctx, tlsCfg,
 		internal.DefaultQuicConfig(30*time.Second, 0),
 		internal.ConnectURI, endpoint, false,
-		onConnect, preNoise, 0, nil,
+		onConnect, preNoise, nil, nil,
 	)
 	if err != nil {
 		if udpConn != nil {
@@ -374,3 +376,171 @@ func (m *mockDevice) WritePacket(pkt []byte) error {
 
 // Ensure json import is used (for potential debug output)
 var _ = json.Marshal
+
+func TestE2E_PreNoiseTolerance(t *testing.T) {
+	loadE2EConfig(t)
+
+	levels := []struct {
+		name    string
+		count   int
+		minSize int
+		maxSize int
+		delay   time.Duration
+	}{
+		{"baseline", 0, 0, 0, 0},
+		{"5_small", 5, 64, 128, 10 * time.Millisecond},
+		{"10_medium", 10, 256, 600, 10 * time.Millisecond},
+		{"20_large", 20, 600, 1200, 20 * time.Millisecond},
+		{"50_large", 50, 800, 1200, 5 * time.Millisecond},
+		{"100_large", 100, 800, 1200, 2 * time.Millisecond},
+	}
+
+	for _, lv := range levels {
+		t.Run(lv.name, func(t *testing.T) {
+			preNoise := internal.NoiseConfig{
+				Count:    lv.count,
+				MinSize:  lv.minSize,
+				MaxSize:  lv.maxSize,
+				DelayMin: lv.delay,
+				DelayMax: lv.delay,
+			}
+
+			for attempt := 1; attempt <= 3; attempt++ {
+				_, ipConn, cleanup, err := dialTunnelErr(t, nil, preNoise)
+				if err != nil {
+					t.Logf("attempt %d: %v", attempt, err)
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+
+				pkt := buildTestIPv4Packet(
+					net.ParseIP(config.AppConfig.IPv4).To4(),
+					net.IPv4(1, 1, 1, 1).To4(),
+					17,
+					make([]byte, 32),
+				)
+				if _, werr := ipConn.WritePacket(pkt); werr != nil {
+					cleanup()
+					t.Logf("attempt %d write: %v", attempt, werr)
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+
+				cleanup()
+				t.Logf("pre-noise %s: OK (attempt %d)", lv.name, attempt)
+				return
+			}
+			t.Fatalf("pre-noise %s: failed after 3 attempts", lv.name)
+		})
+
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func TestE2E_PostConnectNoiseTolerance(t *testing.T) {
+	loadE2EConfig(t)
+
+	levels := []struct {
+		name    string
+		count   int
+		minSize int
+		maxSize int
+		delay   time.Duration
+	}{
+		{"baseline", 0, 0, 0, 0},
+		{"5_small", 5, 64, 128, 10 * time.Millisecond},
+		{"10_medium", 10, 256, 600, 10 * time.Millisecond},
+		{"20_large", 20, 600, 1200, 20 * time.Millisecond},
+		{"50_large", 50, 800, 1200, 5 * time.Millisecond},
+	}
+
+	for _, lv := range levels {
+		t.Run(lv.name, func(t *testing.T) {
+			_, ipConn, cleanup := dialTunnel(t, nil, internal.NoiseConfig{})
+			defer cleanup()
+
+			if lv.count > 0 {
+				internal.InjectNoise(ipConn, internal.NoiseConfig{
+					Count:    lv.count,
+					MinSize:  lv.minSize,
+					MaxSize:  lv.maxSize,
+					DelayMin: lv.delay,
+					DelayMax: lv.delay,
+				})
+			}
+
+			pkt := buildTestIPv4Packet(
+				net.ParseIP(config.AppConfig.IPv4).To4(),
+				net.IPv4(8, 8, 8, 8).To4(),
+				17,
+				make([]byte, 64),
+			)
+			if _, err := ipConn.WritePacket(pkt); err != nil {
+				t.Fatalf("post-noise %s: WritePacket failed: %v", lv.name, err)
+			}
+
+			buf := make([]byte, 1500)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				n, readErr := ipConn.ReadPacket(buf, true)
+				if readErr != nil {
+					t.Logf("post-noise %s: read error: %v", lv.name, readErr)
+					return
+				}
+				t.Logf("post-noise %s: received %d bytes", lv.name, n)
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Logf("post-noise %s: no response within 5s (may be expected)", lv.name)
+			}
+
+			t.Logf("post-noise %s: tunnel still alive", lv.name)
+		})
+
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func TestE2E_DatagramNoiseTolerance(t *testing.T) {
+	loadE2EConfig(t)
+
+	levels := []struct {
+		name  string
+		count int
+		size  int
+	}{
+		{"5x64", 5, 64},
+		{"10x256", 10, 256},
+		{"20x512", 20, 512},
+		{"50x1024", 50, 1024},
+	}
+
+	for _, lv := range levels {
+		t.Run(lv.name, func(t *testing.T) {
+			_, ipConn, cleanup := dialTunnel(t, nil, internal.NoiseConfig{})
+			defer cleanup()
+
+			for i := 0; i < lv.count; i++ {
+				if err := ipConn.SendNoiseDatagram(make([]byte, lv.size)); err != nil {
+					t.Fatalf("datagram noise %s: SendNoiseDatagram[%d] failed: %v", lv.name, i, err)
+				}
+			}
+
+			pkt := buildTestIPv4Packet(
+				net.ParseIP(config.AppConfig.IPv4).To4(),
+				net.IPv4(1, 1, 1, 1).To4(),
+				17,
+				make([]byte, 32),
+			)
+			if _, err := ipConn.WritePacket(pkt); err != nil {
+				t.Fatalf("datagram noise %s: tunnel broken after %d datagrams: %v", lv.name, lv.count, err)
+			}
+			t.Logf("datagram noise %s: tunnel OK after %d datagrams of %d bytes", lv.name, lv.count, lv.size)
+		})
+
+		time.Sleep(2 * time.Second)
+	}
+}

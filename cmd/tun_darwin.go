@@ -9,12 +9,8 @@ import (
 	"os/exec"
 
 	"github.com/Diniboy1123/usque/api"
-	"github.com/Diniboy1123/usque/config"
 	"golang.zx2c4.com/wireguard/tun"
 )
-
-var longDescription = "Expose Warp as a native TUN device that accepts any IP traffic." +
-	" Requires root on macOS (utun)."
 
 func (t *tunDevice) create() (api.TunnelDevice, error) {
 	if t.name == "" {
@@ -32,7 +28,7 @@ func (t *tunDevice) create() (api.TunnelDevice, error) {
 	}
 
 	if t.ipv4 {
-		localIP := config.AppConfig.IPv4
+		localIP := t.account.IPv4
 		peerIP := derivePeerIPv4(localIP)
 		if err := ifconfig(t.name, "inet", localIP, peerIP); err != nil {
 			return nil, fmt.Errorf("set IPv4 ptp: %w", err)
@@ -41,7 +37,7 @@ func (t *tunDevice) create() (api.TunnelDevice, error) {
 	}
 
 	if t.ipv6 {
-		localIP := config.AppConfig.IPv6
+		localIP := t.account.IPv6
 		peerIP := "fe80::1"
 		if err := ifconfig(t.name, "inet6", localIP, peerIP, "prefixlen", "128"); err != nil {
 			return nil, fmt.Errorf("set IPv6 ptp: %w", err)

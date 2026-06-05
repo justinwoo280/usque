@@ -204,10 +204,10 @@ type MaintainTunnelConfig struct {
 	// Packets are sent through the same socket used for QUIC, ensuring matching
 	// source port for flow-level obfuscation.
 	PreNoise internal.NoiseConfig
-	// Fwmark is applied via SO_MARK on the QUIC UDP socket. Used by auto-route
-	// to bypass the tunnel routing rules for the MASQUE client's own traffic.
-	// When 0, no mark is set.
-	Fwmark uint32
+	// InterfaceUpdater binds the QUIC UDP socket to the physical NIC to bypass
+	// tunnel routing. Replaces the old fwmark approach.
+	// When nil, no binding is applied.
+	InterfaceUpdater *InterfaceUpdater
 	// UDPConn is an optional pre-created UDP socket. When non-nil, ConnectTunnel
 	// skips socket creation and uses this one instead (e.g. Android VpnService.protect()'d).
 	// The caller owns the socket lifecycle; MaintainTunnel will NOT close it.
@@ -295,7 +295,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			cfg.UseHTTP2,
 			cfg.OnQUICConnect,
 			cfg.PreNoise,
-			cfg.Fwmark,
+			cfg.InterfaceUpdater,
 			cfg.UDPConn,
 		)
 		if err != nil {

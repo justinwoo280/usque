@@ -37,7 +37,7 @@ func (m *linuxRouteManager) Setup() error {
 	if err := m.setupDNS(); err != nil {
 		log.Printf("Warning: DNS setup failed: %v (you may need to configure DNS manually)", err)
 	}
-	log.Printf("Auto-route enabled: table=%d, fwmark=0x%x", m.cfg.TableIndex, m.cfg.Fwmark)
+	log.Printf("Auto-route enabled: table=%d", m.cfg.TableIndex)
 	return nil
 }
 
@@ -91,7 +91,7 @@ func (m *linuxRouteManager) setupRoutes() error {
 func (m *linuxRouteManager) setupRules() error {
 	rules := m.buildRules()
 	for i, rule := range rules {
-		if err := netlink.RuleAdd(rule); err != nil {
+		if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, unix.EEXIST) {
 			for j := 0; j < i; j++ {
 				_ = netlink.RuleDel(rules[j])
 			}
@@ -102,31 +102,16 @@ func (m *linuxRouteManager) setupRules() error {
 	return nil
 }
 
+// buildRules creates policy routing rules. The QUIC outbound socket bypasses
+// the tunnel via SO_BINDTODEVICE (InterfaceUpdater), so no fwmark rules are needed.
 func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 	var rules []*netlink.Rule
 	priority := m.cfg.RuleIndex
 	nopPriority := priority + 20
 
 	if m.cfg.EnableIPv4 {
+		// Default: send all traffic through tunnel table (including DNS)
 		rule := netlink.NewRule()
-		rule.Priority = priority
-		rule.Mark = m.cfg.Fwmark
-		rule.Table = unix.RT_TABLE_MAIN
-		rule.Family = unix.AF_INET
-		rules = append(rules, rule)
-		priority++
-
-		rule = netlink.NewRule()
-		rule.Priority = priority
-		rule.Invert = true
-		rule.Dport = netlink.NewRulePortRange(53, 53)
-		rule.Table = unix.RT_TABLE_MAIN
-		rule.SuppressPrefixlen = 0
-		rule.Family = unix.AF_INET
-		rules = append(rules, rule)
-		priority++
-
-		rule = netlink.NewRule()
 		rule.Priority = priority
 		rule.Table = m.cfg.TableIndex
 		rule.SuppressPrefixlen = 0
@@ -134,6 +119,7 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 		rules = append(rules, rule)
 		priority++
 
+		// TUN-originated traffic: skip tunnel table (prevent loops)
 		rule = netlink.NewRule()
 		rule.Priority = priority
 		rule.IifName = m.cfg.InterfaceName
@@ -142,6 +128,7 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 		rules = append(rules, rule)
 		priority++
 
+		// Non-lo, non-TUN traffic: tunnel table
 		rule = netlink.NewRule()
 		rule.Priority = priority
 		rule.Invert = true
@@ -151,6 +138,7 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 		rules = append(rules, rule)
 		priority++
 
+		// lo traffic with specific src: tunnel table
 		rule = netlink.NewRule()
 		rule.Priority = priority
 		rule.IifName = "lo"
@@ -172,25 +160,8 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 	}
 
 	if m.cfg.EnableIPv6 {
+		// Default: tunnel table (including DNS)
 		rule := netlink.NewRule()
-		rule.Priority = priority
-		rule.Mark = m.cfg.Fwmark
-		rule.Table = unix.RT_TABLE_MAIN
-		rule.Family = unix.AF_INET6
-		rules = append(rules, rule)
-		priority++
-
-		rule = netlink.NewRule()
-		rule.Priority = priority
-		rule.Invert = true
-		rule.Dport = netlink.NewRulePortRange(53, 53)
-		rule.Table = unix.RT_TABLE_MAIN
-		rule.SuppressPrefixlen = 0
-		rule.Family = unix.AF_INET6
-		rules = append(rules, rule)
-		priority++
-
-		rule = netlink.NewRule()
 		rule.Priority = priority
 		rule.Table = m.cfg.TableIndex
 		rule.SuppressPrefixlen = 0
@@ -198,6 +169,7 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 		rules = append(rules, rule)
 		priority++
 
+		// TUN-originated: skip tunnel table
 		rule = netlink.NewRule()
 		rule.Priority = priority
 		rule.IifName = m.cfg.InterfaceName
@@ -206,6 +178,7 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 		rules = append(rules, rule)
 		priority++
 
+		// lo src-based rules
 		rule = netlink.NewRule()
 		rule.Priority = priority
 		rule.IifName = "lo"

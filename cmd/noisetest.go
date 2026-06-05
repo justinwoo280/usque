@@ -41,10 +41,13 @@ Examples:
   # Stress test: 100 packets
   usque noise-test --noise-count 100 --noise-max-size 1200 --rounds 5 --round-pause 10s`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if !config.ConfigLoaded {
-			cmd.Println("Config not loaded. Please register first.")
+		configPath, _ := cmd.Flags().GetString("config")
+		fc, err := config.LoadFullConfig(configPath)
+		if err != nil {
+			cmd.Printf("Config not loaded: %v\n", err)
 			return
 		}
+		config.AppConfig = fc.Account
 
 		noiseCount, _ := cmd.Flags().GetInt("noise-count")
 		noiseMinSize, _ := cmd.Flags().GetInt("noise-min-size")
