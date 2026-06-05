@@ -28,4 +28,6 @@ go.work.sum
 config*.json*
 usque
 usque.exe
+main
+*.bak
 dist/
