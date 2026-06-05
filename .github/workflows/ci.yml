@@ -16,7 +16,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     env:
-      CGO_ENABLED: "0"
+      CGO_ENABLED: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
