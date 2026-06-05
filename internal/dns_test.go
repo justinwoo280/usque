@@ -28,7 +28,7 @@ func startMockDNS53(t *testing.T) (netip.Addr, *atomic.Int32) {
 
 	var queryCount atomic.Int32
 	go func() {
-		defer pc.Close()
+		defer func() { _ = pc.Close() }()
 		buf := make([]byte, 512)
 		for {
 			n, from, err := pc.ReadFrom(buf)
@@ -70,7 +70,7 @@ func startMockDNSServerFail(t *testing.T, ip string, rcode int) (netip.Addr, *at
 
 	var queryCount atomic.Int32
 	go func() {
-		defer pc.Close()
+		defer func() { _ = pc.Close() }()
 		buf := make([]byte, 512)
 		for {
 			n, from, err := pc.ReadFrom(buf)
@@ -266,7 +266,7 @@ func TestTunnelDNSResolver_TunnelNetstack(t *testing.T) {
 	}
 	defer func() {
 		drainTUN(t, tunDev)
-		tunDev.Close()
+		_ = tunDev.Close()
 	}()
 
 	resolver := TunnelDNSResolver{
@@ -309,7 +309,7 @@ func TestTunnelDNSResolver_DialUsesTunnelNetwork(t *testing.T) {
 	}
 	defer func() {
 		drainTUN(t, tunDev)
-		tunDev.Close()
+		_ = tunDev.Close()
 	}()
 
 	testResolver := &net.Resolver{
@@ -381,7 +381,7 @@ func TestNewNetstackResolver(t *testing.T) {
 	}
 	defer func() {
 		drainTUN(t, tunDev)
-		tunDev.Close()
+		_ = tunDev.Close()
 	}()
 
 	resolver := NewNetstackResolver(tunNet, []netip.Addr{dnsAddr})
@@ -453,7 +453,7 @@ func TestGetProxyResolver_RemoteDNS(t *testing.T) {
 	}
 	defer func() {
 		drainTUN(t, tunDev)
-		tunDev.Close()
+		_ = tunDev.Close()
 	}()
 
 	resolver := GetProxyResolver(false, false, tunNet, []netip.Addr{dnsAddr}, 2*time.Second)
