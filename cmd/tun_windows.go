@@ -21,7 +21,8 @@ func (t *tunDevice) create() (api.TunnelDevice, error) {
 		return nil, err
 	}
 
-	luid := winipcfg.LUID(wAdapter.LUID())
+	t.luid = wAdapter.LUID()
+	luid := winipcfg.LUID(t.luid)
 
 	var prefixes []netip.Prefix
 	if t.ipv4 {

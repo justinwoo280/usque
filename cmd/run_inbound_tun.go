@@ -22,6 +22,7 @@ type tunDevice struct {
 	ipv6     bool
 	persist  bool
 	tunFd    int
+	luid     uint64
 	account  *config.AccountConfig
 }
 
@@ -103,6 +104,7 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 			IPv4:          net.ParseIP(fc.Account.IPv4),
 			IPv6:          net.ParseIP(fc.Account.IPv6),
 			EndpointIP:    extractEndpointIP(ob.endpoint),
+			LUID:          t.luid,
 		}
 		if len(settings.DNS) > 0 {
 			for _, d := range settings.DNS {

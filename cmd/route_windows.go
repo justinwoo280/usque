@@ -37,11 +37,15 @@ func newRouteManager(cfg AutoRouteConfig) RouteManager {
 }
 
 func (m *windowsRouteManager) Setup() error {
-	iface, err := net.InterfaceByName(m.cfg.InterfaceName)
-	if err != nil {
-		return fmt.Errorf("find interface %s: %w", m.cfg.InterfaceName, err)
+	if m.cfg.LUID != 0 {
+		m.luid = winipcfg.LUID(m.cfg.LUID)
+	} else {
+		iface, err := net.InterfaceByName(m.cfg.InterfaceName)
+		if err != nil {
+			return fmt.Errorf("find interface %s: %w", m.cfg.InterfaceName, err)
+		}
+		m.luid = winipcfg.LUID(iface.Index)
 	}
-	m.luid = winipcfg.LUID(iface.Index)
 
 	gw, gwIface, err := findDefaultGateway()
 	if err != nil {

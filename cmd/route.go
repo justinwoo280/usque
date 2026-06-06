@@ -29,6 +29,10 @@ type AutoRouteConfig struct {
 	TableIndex    int
 	RuleIndex     int
 	EndpointIP    net.IP
+	// LUID is the real NET_LUID of the TUN adapter (Windows only).
+	// On Windows, CreateIpForwardEntry2 requires the actual LUID from the
+	// NDIS driver; an interface index cast to uint64 is not accepted.
+	LUID uint64
 }
 
 func defaultDNSServers() []net.IP {
