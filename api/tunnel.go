@@ -212,6 +212,12 @@ type MaintainTunnelConfig struct {
 	// skips socket creation and uses this one instead (e.g. Android VpnService.protect()'d).
 	// The caller owns the socket lifecycle; MaintainTunnel will NOT close it.
 	UDPConn *net.UDPConn
+	// DNSHijackTarget4 is the IPv4 DNS server IP to rewrite outbound DNS queries to.
+	// When non-nil, all IPv4 UDP port 53 packets have their destination IP rewritten
+	// to this address at L3, and the corresponding response source IP is restored.
+	DNSHijackTarget4 net.IP
+	// DNSHijackTarget6 is the IPv6 DNS server IP to rewrite outbound DNS queries to.
+	DNSHijackTarget6 net.IP
 }
 
 // cloneHookEnv returns a shallow copy of src so concurrent hook invocations
@@ -263,6 +269,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 	}
 
 	packetBufferPool := NewNetBuffer(cfg.MTU)
+	dnsRewriter := internal.NewDNSRewriter(cfg.DNSHijackTarget4, cfg.DNSHijackTarget6)
 
 	for {
 		if ctx.Err() != nil {
@@ -364,6 +371,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					packetBufferPool.Put(buf)
 					return
 				}
+				dnsRewriter.RewriteQuery(buf[:n])
 				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
 					packetBufferPool.Put(buf)
@@ -406,6 +414,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					log.Printf("Error reading from IP connection: %v, continuing...", err)
 					continue
 				}
+				dnsRewriter.RewriteResponse(buf[:n])
 				if err := cfg.Device.WritePacket(buf[:n]); err != nil {
 					errChan <- fmt.Errorf("failed to write to TUN device: %w", err)
 					return

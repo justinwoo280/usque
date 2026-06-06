@@ -144,6 +144,26 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 	ob.maintainCfg.HookEnv = hookEnv
 	ob.maintainCfg.InterfaceUpdater = updater
 
+	if len(settings.DNS) > 0 {
+		for _, d := range settings.DNS {
+			ip := net.ParseIP(d)
+			if ip == nil {
+				continue
+			}
+			if ip.To4() != nil && ob.maintainCfg.DNSHijackTarget4 == nil {
+				ob.maintainCfg.DNSHijackTarget4 = ip
+			} else if ip.To4() == nil && ob.maintainCfg.DNSHijackTarget6 == nil {
+				ob.maintainCfg.DNSHijackTarget6 = ip
+			}
+		}
+		if ob.maintainCfg.DNSHijackTarget4 != nil {
+			log.Printf("DNS hijack target (IPv4): %s", ob.maintainCfg.DNSHijackTarget4)
+		}
+		if ob.maintainCfg.DNSHijackTarget6 != nil {
+			log.Printf("DNS hijack target (IPv6): %s", ob.maintainCfg.DNSHijackTarget6)
+		}
+	}
+
 	go api.MaintainTunnel(ctx, ob.maintainCfg)
 
 	if settings.AutoRoute {
