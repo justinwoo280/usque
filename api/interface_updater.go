@@ -79,7 +79,13 @@ func (u *InterfaceUpdater) Update() {
 			if iface.Index == u.tunIndex {
 				continue
 			}
-			if strings.Contains(iface.Name, "vEthernet") {
+			nameLower := strings.ToLower(iface.Name)
+			if strings.Contains(nameLower, "vethernet") ||
+				strings.Contains(nameLower, "vmnet") ||
+				strings.Contains(nameLower, "virtualbox") ||
+				strings.Contains(nameLower, "tap-windows") ||
+				strings.Contains(nameLower, "zerotier") ||
+				strings.Contains(nameLower, "hamachi") {
 				continue
 			}
 			if iface.Flags&net.FlagUp == 0 {
