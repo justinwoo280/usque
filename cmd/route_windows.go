@@ -26,8 +26,9 @@ func flushResolverCache() error {
 }
 
 type windowsRouteManager struct {
-	cfg  AutoRouteConfig
-	luid winipcfg.LUID
+	cfg            AutoRouteConfig
+	luid           winipcfg.LUID
+	changeCallback *winipcfg.InterfaceChangeCallback
 }
 
 func newRouteManager(cfg AutoRouteConfig) RouteManager {
@@ -72,6 +73,13 @@ func (m *windowsRouteManager) Setup() error {
 }
 
 func (m *windowsRouteManager) Cleanup() error {
+	if m.changeCallback != nil {
+		if err := m.changeCallback.Unregister(); err != nil {
+			log.Printf("Warning: failed to unregister interface change callback: %v", err)
+		}
+		m.changeCallback = nil
+	}
+
 	if m.cfg.EndpointIP != nil {
 		mask := "255.255.255.255"
 		if m.cfg.EndpointIP.To4() == nil {
@@ -91,6 +99,22 @@ func (m *windowsRouteManager) Cleanup() error {
 		log.Printf("Warning: failed to flush DNS cache: %v", err)
 	}
 	return nil
+}
+
+func (m *windowsRouteManager) SetInterfaceChangeCallback(cb func()) {
+	if m.changeCallback != nil {
+		_ = m.changeCallback.Unregister()
+		m.changeCallback = nil
+	}
+	reg, err := winipcfg.RegisterInterfaceChangeCallback(func(_ winipcfg.MibNotificationType, _ *winipcfg.MibIPInterfaceRow) {
+		cb()
+	})
+	if err != nil {
+		log.Printf("Warning: failed to register interface change callback: %v", err)
+		return
+	}
+	m.changeCallback = reg
+	log.Println("Interface change callback registered")
 }
 
 func findDefaultGateway() (string, string, error) {

@@ -92,6 +92,8 @@ func (m *darwinRouteManager) Cleanup() error {
 	return nil
 }
 
+func (m *darwinRouteManager) SetInterfaceChangeCallback(func()) {}
+
 func (m *darwinRouteManager) setupDNS() error {
 	if len(m.cfg.DNSServers) == 0 {
 		return nil

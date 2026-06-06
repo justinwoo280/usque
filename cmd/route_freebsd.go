@@ -89,6 +89,8 @@ func (m *freebsdRouteManager) Cleanup() error {
 	return nil
 }
 
+func (m *freebsdRouteManager) SetInterfaceChangeCallback(func()) {}
+
 func (m *freebsdRouteManager) setupDNS() error {
 	if len(m.cfg.DNSServers) == 0 {
 		return nil

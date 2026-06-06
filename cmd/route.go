@@ -11,6 +11,11 @@ const (
 type RouteManager interface {
 	Setup() error
 	Cleanup() error
+	// SetInterfaceChangeCallback registers a callback invoked when the system's
+	// network interfaces change (e.g. Wi-Fi disconnect, cable unplug). On Windows
+	// this is backed by winipcfg.RegisterInterfaceChangeCallback; on other
+	// platforms it is a no-op.
+	SetInterfaceChangeCallback(cb func())
 }
 
 // AutoRouteConfig holds parameters for automatic route/DNS configuration.

@@ -153,6 +153,7 @@ func (c *CongestionConfig) Validate() error {
 
 // NoiseJSON is the JSON-serializable noise injection config.
 type NoiseJSON struct {
+	Enabled  bool   `json:"enabled"`
 	Count    int    `json:"count"`
 	MinSize  int    `json:"min_size"`
 	MaxSize  int    `json:"max_size"`
@@ -189,7 +190,9 @@ func LoadFullConfig(path string) (*FullConfig, error) {
 					Port:            443,
 					KeepalivePeriod: "30s",
 					ReconnectDelay:  "1s",
-					Congestion:      CongestionConfig{Type: "reno", BBRProfile: "standard"},
+					Congestion:      CongestionConfig{Type: "bbr", BBRProfile: "standard"},
+					Noise:           defaultNoise(),
+					PreNoise:        defaultPreNoise(),
 				},
 			},
 		}
@@ -300,7 +303,11 @@ func ParseDuration(s string, def time.Duration) time.Duration {
 }
 
 // ToNoiseConfig converts NoiseJSON to internal.NoiseConfig.
+// Returns a zero config when Enabled is false so no noise is injected.
 func (n *NoiseJSON) ToNoiseConfig() internal.NoiseConfig {
+	if !n.Enabled {
+		return internal.NoiseConfig{}
+	}
 	return internal.NoiseConfig{
 		Count:    n.Count,
 		MinSize:  n.MinSize,
@@ -322,7 +329,7 @@ func (fc *FullConfig) applyDefaults() {
 		ob.ReconnectDelay = "1s"
 	}
 	if ob.Congestion.Type == "" {
-		ob.Congestion.Type = "reno"
+		ob.Congestion.Type = "bbr"
 	}
 	if ob.Congestion.Type == "bbr" && ob.Congestion.BBRProfile == "" {
 		ob.Congestion.BBRProfile = "standard"
@@ -360,10 +367,34 @@ func NewDefaultFullConfig(acct AccountConfig) *FullConfig {
 				Port:            443,
 				KeepalivePeriod: "30s",
 				ReconnectDelay:  "1s",
-				Congestion:      CongestionConfig{Type: "reno", BBRProfile: "standard"},
+				Congestion:      CongestionConfig{Type: "bbr", BBRProfile: "standard"},
+				Noise:           defaultNoise(),
+				PreNoise:        defaultPreNoise(),
 			},
 		},
 	}
 	fc.applyDefaults()
 	return fc
+}
+
+func defaultNoise() NoiseJSON {
+	return NoiseJSON{
+		Enabled:  true,
+		Count:    5,
+		MinSize:  100,
+		MaxSize:  400,
+		DelayMin: "10ms",
+		DelayMax: "50ms",
+	}
+}
+
+func defaultPreNoise() NoiseJSON {
+	return NoiseJSON{
+		Enabled:  true,
+		Count:    3,
+		MinSize:  64,
+		MaxSize:  128,
+		DelayMin: "5ms",
+		DelayMax: "15ms",
+	}
 }

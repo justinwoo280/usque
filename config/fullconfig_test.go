@@ -48,6 +48,7 @@ func TestLoadFullConfig(t *testing.T) {
 					"bbr_profile": "aggressive"
 				},
 				"noise": {
+					"enabled": true,
 					"count": 5,
 					"min_size": 64,
 					"max_size": 512,
@@ -201,8 +202,8 @@ func TestLoadFullConfigDefaults(t *testing.T) {
 	if ob.KeepalivePeriod != "30s" {
 		t.Errorf("default keepalive = %q, want 30s", ob.KeepalivePeriod)
 	}
-	if ob.Congestion.Type != "reno" {
-		t.Errorf("default congestion = %q, want reno", ob.Congestion.Type)
+	if ob.Congestion.Type != "bbr" {
+		t.Errorf("default congestion = %q, want bbr", ob.Congestion.Type)
 	}
 	if ob.SNIAddress == "" {
 		t.Error("default SNI should not be empty")
@@ -281,6 +282,7 @@ func TestParseDuration(t *testing.T) {
 
 func TestNoiseJSONToConfig(t *testing.T) {
 	n := NoiseJSON{
+		Enabled:  true,
 		Count:    5,
 		MinSize:  64,
 		MaxSize:  512,
@@ -296,6 +298,20 @@ func TestNoiseJSONToConfig(t *testing.T) {
 	}
 	if nc.DelayMax != 100*time.Millisecond {
 		t.Errorf("delay_max = %v, want 100ms", nc.DelayMax)
+	}
+
+	disabled := NoiseJSON{
+		Enabled: false,
+		Count:   10,
+		MinSize: 100,
+		MaxSize: 500,
+	}
+	dc := disabled.ToNoiseConfig()
+	if dc.Count != 0 {
+		t.Errorf("disabled noise count = %d, want 0", dc.Count)
+	}
+	if dc.MinSize != 0 || dc.MaxSize != 0 {
+		t.Errorf("disabled noise sizes = [%d,%d], want [0,0]", dc.MinSize, dc.MaxSize)
 	}
 }
 

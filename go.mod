@@ -5,14 +5,19 @@ go 1.25.5
 require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20260409225322-8d7bb0a858a2
 	github.com/apernet/quic-go v0.59.1-0.20260425001925-6c6cc9bcb716
+	github.com/miekg/dns v1.1.72
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/spf13/cobra v1.10.2
 	github.com/txthinking/runnergroup v0.0.0-20210608031112-152c7c4432bf
 	github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e
 	github.com/vishvananda/netlink v1.3.1
 	github.com/yosida95/uritemplate/v3 v3.0.2
+	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90
 	golang.org/x/net v0.53.0
+	golang.org/x/sys v0.43.0
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
+	golang.zx2c4.com/wireguard/windows v1.0.1
 	gvisor.dev/gvisor v0.0.0-20260408064518-65a410b0d584
 )
 
@@ -20,25 +25,17 @@ require (
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/lxn/walk v0.0.0-20210112085537-c389da54e794 // indirect
-	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect
-	github.com/miekg/dns v1.1.72 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
-	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 // indirect
 	golang.org/x/mod v0.34.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
-	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	golang.zx2c4.com/wireguard/windows v1.0.1 // indirect
-	gopkg.in/Knetic/govaluate.v3 v3.0.0 // indirect
 )
 
 replace github.com/Diniboy1123/connect-ip-go => ./connect-ip

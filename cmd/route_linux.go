@@ -56,6 +56,8 @@ func (m *linuxRouteManager) Cleanup() error {
 	return nil
 }
 
+func (m *linuxRouteManager) SetInterfaceChangeCallback(func()) {}
+
 func (m *linuxRouteManager) setupRoutes() error {
 	link, err := netlink.LinkByName(m.cfg.InterfaceName)
 	if err != nil {

@@ -124,6 +124,9 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 		} else {
 			updater = api.NewInterfaceUpdater("auto", tunIfIndex)
 			updater.Update()
+			if routeMgr != nil {
+				routeMgr.SetInterfaceChangeCallback(updater.Update)
+			}
 		}
 	}
 
