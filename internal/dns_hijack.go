@@ -3,6 +3,7 @@ package internal
 import (
 	"encoding/binary"
 	"net"
+	"sync"
 )
 
 // DNSRewriter hijacks DNS packets at L3, rewriting the destination IP to a
@@ -14,21 +15,33 @@ import (
 // Supports separate IPv4 and IPv6 hijack targets so that IPv4 DNS queries are
 // rewritten to the configured IPv4 DNS server and IPv6 queries to the IPv6 one.
 //
+// Multiple concurrent DNS queries are tracked independently via a map so that
+// overlapping requests do not overwrite each other's state.
+//
 // Only unfragmented UDP port 53 packets are rewritten; everything else passes
 // through unchanged.
 type DNSRewriter struct {
 	hijackDst4 net.IP
 	hijackDst6 net.IP
 
-	origSrcIP net.IP
-	origSrcP  uint16
-	origDstIP net.IP
+	mu      sync.Mutex
+	pending map[dnsQueryKey]net.IP
+}
+
+type dnsQueryKey struct {
+	srcIP     string
+	srcPort   uint16
+	hijackDst string
 }
 
 // NewDNSRewriter creates a DNSRewriter with separate IPv4 and IPv6 targets.
 // Either target may be nil; packets of that address family will pass through.
 func NewDNSRewriter(target4, target6 net.IP) *DNSRewriter {
-	return &DNSRewriter{hijackDst4: target4, hijackDst6: target6}
+	return &DNSRewriter{
+		hijackDst4: target4,
+		hijackDst6: target6,
+		pending:    make(map[dnsQueryKey]net.IP),
+	}
 }
 
 // RewriteQuery rewrites outbound DNS queries: changes the destination IP to
@@ -51,9 +64,22 @@ func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 		return pkt
 	}
 
-	r.origSrcIP = copyIP(srcIP(pkt))
-	r.origSrcP = udpSrcPort(pkt)
-	r.origDstIP = copyIP(dstIP(pkt))
+	srcAddr := srcIP(pkt)
+	srcPort := udpSrcPort(pkt)
+	origDst := copyIP(dstIP(pkt))
+
+	key := dnsQueryKey{
+		srcIP:     srcAddr.String(),
+		srcPort:   srcPort,
+		hijackDst: hijackDst.String(),
+	}
+
+	r.mu.Lock()
+	r.pending[key] = origDst
+	if len(r.pending) > 1024 {
+		r.pending = make(map[dnsQueryKey]net.IP)
+	}
+	r.mu.Unlock()
 
 	if v4 {
 		copy(pkt[16:20], hijackDst.To4())
@@ -69,9 +95,6 @@ func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 // the original query destination so the application receives a reply from the
 // IP it originally queried. Returns the same buffer.
 func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
-	if r.origDstIP == nil {
-		return pkt
-	}
 	if !isUDP(pkt) || udpSrcPort(pkt) != 53 {
 		return pkt
 	}
@@ -95,15 +118,32 @@ func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
 		return pkt
 	}
 
+	dstAddr := dstIP(pkt)
+	dstPort := udpDstPort(pkt)
+	key := dnsQueryKey{
+		srcIP:     dstAddr.String(),
+		srcPort:   dstPort,
+		hijackDst: hijackDst.String(),
+	}
+
+	r.mu.Lock()
+	origDst, ok := r.pending[key]
+	if ok {
+		delete(r.pending, key)
+	}
+	r.mu.Unlock()
+
+	if !ok {
+		return pkt
+	}
+
 	if v4 {
-		copy(pkt[12:16], r.origDstIP.To4())
+		copy(pkt[12:16], origDst.To4())
 		updateIPv4Checksum(pkt)
 	} else {
-		copy(pkt[8:24], r.origDstIP.To16())
+		copy(pkt[8:24], origDst.To16())
 	}
 	updateUDPChecksum(pkt)
-
-	r.origDstIP = nil
 	return pkt
 }
 

@@ -366,3 +366,49 @@ func TestUDPChecksum_IPv6_Valid(t *testing.T) {
 	)
 	verifyUDPChecksum(t, pkt)
 }
+
+func TestDNSRewriter_ConcurrentQueries(t *testing.T) {
+	hijackDst := net.ParseIP("1.1.1.1")
+	r := NewDNSRewriter(hijackDst, nil)
+
+	srcIP := net.ParseIP("10.0.0.1")
+
+	queryA := buildIPv4UDP(srcIP, net.ParseIP("203.0.113.1"), 11111, 53, []byte{0x0A})
+	queryB := buildIPv4UDP(srcIP, net.ParseIP("8.8.8.8"), 22222, 53, []byte{0x0B})
+	queryC := buildIPv4UDP(srcIP, net.ParseIP("9.9.9.9"), 33333, 53, []byte{0x0C})
+
+	r.RewriteQuery(queryA)
+	r.RewriteQuery(queryB)
+	r.RewriteQuery(queryC)
+
+	if !net.IP(queryA[16:20]).Equal(hijackDst.To4()) {
+		t.Fatal("queryA dst not rewritten")
+	}
+	if !net.IP(queryB[16:20]).Equal(hijackDst.To4()) {
+		t.Fatal("queryB dst not rewritten")
+	}
+
+	respB := buildIPv4UDP(hijackDst, srcIP, 53, 22222, []byte{0x8B})
+	r.RewriteResponse(respB)
+	if !net.IP(respB[12:16]).Equal(net.ParseIP("8.8.8.8")) {
+		t.Errorf("respB src not restored to 8.8.8.8: got %v", net.IP(respB[12:16]))
+	}
+	verifyIPv4Checksum(t, respB)
+	verifyUDPChecksum(t, respB)
+
+	respA := buildIPv4UDP(hijackDst, srcIP, 53, 11111, []byte{0x8A})
+	r.RewriteResponse(respA)
+	if !net.IP(respA[12:16]).Equal(net.ParseIP("203.0.113.1")) {
+		t.Errorf("respA src not restored to 203.0.113.1: got %v", net.IP(respA[12:16]))
+	}
+	verifyIPv4Checksum(t, respA)
+	verifyUDPChecksum(t, respA)
+
+	respC := buildIPv4UDP(hijackDst, srcIP, 53, 33333, []byte{0x8C})
+	r.RewriteResponse(respC)
+	if !net.IP(respC[12:16]).Equal(net.ParseIP("9.9.9.9")) {
+		t.Errorf("respC src not restored to 9.9.9.9: got %v", net.IP(respC[12:16]))
+	}
+	verifyIPv4Checksum(t, respC)
+	verifyUDPChecksum(t, respC)
+}
