@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
 	"sync"
@@ -8,84 +9,99 @@ import (
 
 // DNSRewriter hijacks DNS packets at L3, rewriting the destination IP to a
 // configured DNS server on the outbound path and restoring the original IP on
-// the inbound path. This ensures that even when the OS uses the wrong DNS
-// server (e.g. system DNS on Windows), the actual queries reach the configured
-// DNS server through the MASQUE tunnel.
+// the inbound path.
 //
-// Supports separate IPv4 and IPv6 hijack targets so that IPv4 DNS queries are
-// rewritten to the configured IPv4 DNS server and IPv6 queries to the IPv6 one.
-//
-// Multiple concurrent DNS queries are tracked independently via a map so that
-// overlapping requests do not overwrite each other's state.
-//
-// Only unfragmented UDP port 53 packets are rewritten; everything else passes
-// through unchanged.
+// The implementation is allocation-free on the hot path: map keys, map values,
+// and hijack target comparisons all use fixed-size byte arrays. This avoids GC
+// pressure from per-packet string/net.IP allocations that caused DNS latency.
 type DNSRewriter struct {
-	hijackDst4 net.IP
-	hijackDst6 net.IP
+	h4    [4]byte
+	h6    [16]byte
+	h4Set bool
+	h6Set bool
 
 	mu      sync.Mutex
-	pending map[dnsQueryKey]net.IP
+	pending map[dnsQueryKey][16]byte
 }
 
 type dnsQueryKey struct {
-	srcIP     string
-	srcPort   uint16
-	hijackDst string
+	ip   [16]byte
+	port uint16
+	v4   bool
 }
 
 // NewDNSRewriter creates a DNSRewriter with separate IPv4 and IPv6 targets.
 // Either target may be nil; packets of that address family will pass through.
 func NewDNSRewriter(target4, target6 net.IP) *DNSRewriter {
-	return &DNSRewriter{
-		hijackDst4: target4,
-		hijackDst6: target6,
-		pending:    make(map[dnsQueryKey]net.IP),
+	r := &DNSRewriter{
+		pending: make(map[dnsQueryKey][16]byte),
 	}
+	if target4 != nil {
+		if v4 := target4.To4(); v4 != nil {
+			copy(r.h4[:], v4)
+			r.h4Set = true
+		}
+	}
+	if target6 != nil {
+		if v6 := target6.To16(); v6 != nil {
+			copy(r.h6[:], v6)
+			r.h6Set = true
+		}
+	}
+	return r
 }
 
 // RewriteQuery rewrites outbound DNS queries: changes the destination IP to
 // the hijack target matching the packet's address family and updates IP + UDP
-// checksums. Returns the same buffer. Non-DNS packets are returned unchanged.
+// checksums. Non-DNS packets are returned unchanged.
 func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 	if !isUDP(pkt) || udpDstPort(pkt) != 53 {
 		return pkt
 	}
 
 	v4 := pkt[0]>>4 == 4
-	hijackDst := r.hijackDst6
 	if v4 {
-		hijackDst = r.hijackDst4
-		if isFragmentedIPv4(pkt) {
+		if !r.h4Set || isFragmentedIPv4(pkt) {
 			return pkt
 		}
-	}
-	if hijackDst == nil {
-		return pkt
-	}
 
-	srcAddr := srcIP(pkt)
-	srcPort := udpSrcPort(pkt)
-	origDst := copyIP(dstIP(pkt))
+		var key dnsQueryKey
+		key.v4 = true
+		copy(key.ip[:4], pkt[12:16])
+		key.port = binary.BigEndian.Uint16(pkt[udpOffV4(pkt):])
 
-	key := dnsQueryKey{
-		srcIP:     srcAddr.String(),
-		srcPort:   srcPort,
-		hijackDst: hijackDst.String(),
-	}
+		var origDst [16]byte
+		copy(origDst[:4], pkt[16:20])
 
-	r.mu.Lock()
-	r.pending[key] = origDst
-	if len(r.pending) > 1024 {
-		r.pending = make(map[dnsQueryKey]net.IP)
-	}
-	r.mu.Unlock()
+		r.mu.Lock()
+		r.pending[key] = origDst
+		if len(r.pending) > 1024 {
+			r.pending = make(map[dnsQueryKey][16]byte)
+		}
+		r.mu.Unlock()
 
-	if v4 {
-		copy(pkt[16:20], hijackDst.To4())
+		copy(pkt[16:20], r.h4[:])
 		updateIPv4Checksum(pkt)
 	} else {
-		copy(pkt[24:40], hijackDst.To16())
+		if !r.h6Set {
+			return pkt
+		}
+
+		var key dnsQueryKey
+		copy(key.ip[:], pkt[8:24])
+		key.port = binary.BigEndian.Uint16(pkt[udpOffV6:])
+
+		var origDst [16]byte
+		copy(origDst[:], pkt[24:40])
+
+		r.mu.Lock()
+		r.pending[key] = origDst
+		if len(r.pending) > 1024 {
+			r.pending = make(map[dnsQueryKey][16]byte)
+		}
+		r.mu.Unlock()
+
+		copy(pkt[24:40], r.h6[:])
 	}
 	updateUDPChecksum(pkt)
 	return pkt
@@ -93,59 +109,68 @@ func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 
 // RewriteResponse rewrites inbound DNS responses: restores the source IP to
 // the original query destination so the application receives a reply from the
-// IP it originally queried. Returns the same buffer.
+// IP it originally queried.
 func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
 	if !isUDP(pkt) || udpSrcPort(pkt) != 53 {
 		return pkt
 	}
 
 	v4 := pkt[0]>>4 == 4
-	hijackDst := r.hijackDst6
 	if v4 {
-		hijackDst = r.hijackDst4
-	}
-	if hijackDst == nil {
-		return pkt
-	}
+		if !r.h4Set || !bytes.Equal(pkt[12:16], r.h4[:]) {
+			return pkt
+		}
 
-	var curSrc net.IP
-	if v4 {
-		curSrc = net.IP(pkt[12:16])
-	} else {
-		curSrc = net.IP(pkt[8:24])
-	}
-	if !curSrc.Equal(hijackDst) {
-		return pkt
-	}
+		var key dnsQueryKey
+		key.v4 = true
+		copy(key.ip[:4], pkt[16:20])
+		key.port = binary.BigEndian.Uint16(pkt[udpOffV4(pkt)+2:])
 
-	dstAddr := dstIP(pkt)
-	dstPort := udpDstPort(pkt)
-	key := dnsQueryKey{
-		srcIP:     dstAddr.String(),
-		srcPort:   dstPort,
-		hijackDst: hijackDst.String(),
-	}
+		r.mu.Lock()
+		origDst, ok := r.pending[key]
+		if ok {
+			delete(r.pending, key)
+		}
+		r.mu.Unlock()
 
-	r.mu.Lock()
-	origDst, ok := r.pending[key]
-	if ok {
-		delete(r.pending, key)
-	}
-	r.mu.Unlock()
+		if !ok {
+			return pkt
+		}
 
-	if !ok {
-		return pkt
-	}
-
-	if v4 {
-		copy(pkt[12:16], origDst.To4())
+		copy(pkt[12:16], origDst[:4])
 		updateIPv4Checksum(pkt)
 	} else {
-		copy(pkt[8:24], origDst.To16())
+		if !r.h6Set || !bytes.Equal(pkt[8:24], r.h6[:]) {
+			return pkt
+		}
+
+		var key dnsQueryKey
+		copy(key.ip[:], pkt[24:40])
+		key.port = binary.BigEndian.Uint16(pkt[udpOffV6+2:])
+
+		r.mu.Lock()
+		origDst, ok := r.pending[key]
+		if ok {
+			delete(r.pending, key)
+		}
+		r.mu.Unlock()
+
+		if !ok {
+			return pkt
+		}
+
+		copy(pkt[8:24], origDst[:])
 	}
 	updateUDPChecksum(pkt)
 	return pkt
 }
+
+// udpOffV4 returns the UDP header offset for an IPv4 packet (IHL-based).
+func udpOffV4(pkt []byte) int {
+	return int(pkt[0]&0x0f) * 4
+}
+
+const udpOffV6 = 40
 
 // --- IPv4 helpers ---
 

@@ -218,6 +218,13 @@ type MaintainTunnelConfig struct {
 	DNSHijackTarget4 net.IP
 	// DNSHijackTarget6 is the IPv6 DNS server IP to rewrite outbound DNS queries to.
 	DNSHijackTarget6 net.IP
+	// OnStateChange is called on tunnel lifecycle transitions.
+	// States: "connecting", "connected", "reconnecting", "error".
+	// Used by mobile bindings to push state updates to the UI.
+	OnStateChange func(state string)
+	// OnTraffic is called after each successful pump cycle with cumulative
+	// bytes sent (device→tunnel) and received (tunnel→device).
+	OnTraffic func(sent, recv int64)
 }
 
 // cloneHookEnv returns a shallow copy of src so concurrent hook invocations
@@ -271,6 +278,14 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 	packetBufferPool := NewNetBuffer(cfg.MTU)
 	dnsRewriter := internal.NewDNSRewriter(cfg.DNSHijackTarget4, cfg.DNSHijackTarget6)
 
+	emitState := func(state string) {
+		if cfg.OnStateChange != nil {
+			cfg.OnStateChange(state)
+		}
+	}
+
+	var totalSent, totalRecv int64
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -292,6 +307,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", n)
 		}
 
+		emitState("connecting")
 		log.Printf("Establishing MASQUE connection to %s", cfg.Endpoint)
 		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
 			ctx,
@@ -307,6 +323,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
+			emitState("error")
 			if ipConn != nil {
 				_ = ipConn.Close()
 			}
@@ -316,6 +333,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			if udpConn != nil && cfg.UDPConn == nil {
 				_ = udpConn.Close()
 			}
+			emitState("reconnecting")
 			if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
 				return
 			}
@@ -323,6 +341,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 		if rsp.StatusCode != 200 {
 			log.Printf("Tunnel connection failed: %s", rsp.Status)
+			emitState("error")
 			_ = ipConn.Close()
 			if tr != nil {
 				_ = tr.Close()
@@ -330,12 +349,14 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			if udpConn != nil && cfg.UDPConn == nil {
 				_ = udpConn.Close()
 			}
+			emitState("reconnecting")
 			if sleepErr := sleepCtx(ctx, cfg.ReconnectDelay); sleepErr != nil {
 				return
 			}
 			continue
 		}
 
+		emitState("connected")
 		log.Println("Connected to MASQUE server")
 
 		if cfg.OnConnect != "" {
@@ -382,6 +403,10 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					log.Printf("Error writing to IP connection: %v, continuing...", err)
 					continue
 				}
+				totalSent += int64(n)
+				if cfg.OnTraffic != nil {
+					cfg.OnTraffic(totalSent, totalRecv)
+				}
 				packetBufferPool.Put(buf)
 
 				if len(icmp) > 0 {
@@ -419,6 +444,10 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					errChan <- fmt.Errorf("failed to write to TUN device: %w", err)
 					return
 				}
+				totalRecv += int64(n)
+				if cfg.OnTraffic != nil {
+					cfg.OnTraffic(totalSent, totalRecv)
+				}
 			}
 		}()
 
@@ -428,6 +457,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		err = <-errChan
 		log.Printf("Tunnel connection lost: %v. Reconnecting...", err)
+		emitState("reconnecting")
 
 		if cfg.OnDisconnect != "" {
 			env := cloneHookEnv(cfg.HookEnv)

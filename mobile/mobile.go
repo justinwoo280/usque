@@ -16,10 +16,54 @@ import (
 	"github.com/apernet/quic-go"
 )
 
+// TunnelListener receives tunnel lifecycle events from the Go engine.
+// Implement this interface in Kotlin/Java and pass to RegisterListener.
+// All methods are called from Go goroutines — implementations must be
+// thread-safe and should dispatch to the UI thread as needed.
+type TunnelListener interface {
+	OnStateChange(state string)
+	OnTraffic(sent int64, recv int64)
+}
+
 var (
-	mgr     *tunnelManager
-	mgrOnce sync.Once
+	mgr      *tunnelManager
+	mgrOnce  sync.Once
+	listener TunnelListener
+	listMu   sync.RWMutex
 )
+
+// RegisterListener sets the callback receiver for tunnel events.
+// Only one listener is active at a time; registering replaces the previous one.
+func RegisterListener(l TunnelListener) {
+	listMu.Lock()
+	listener = l
+	listMu.Unlock()
+}
+
+// UnregisterListener removes the current listener.
+func UnregisterListener() {
+	listMu.Lock()
+	listener = nil
+	listMu.Unlock()
+}
+
+func notifyState(state string) {
+	listMu.RLock()
+	l := listener
+	listMu.RUnlock()
+	if l != nil {
+		l.OnStateChange(state)
+	}
+}
+
+func notifyTraffic(sent, recv int64) {
+	listMu.RLock()
+	l := listener
+	listMu.RUnlock()
+	if l != nil {
+		l.OnTraffic(sent, recv)
+	}
+}
 
 type tunnelManager struct {
 	ctx    context.Context
@@ -103,7 +147,6 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 		case "brutal":
 			onQUICConnect = func(conn *quic.Conn) {
 				conn.SetCongestionControl(congestion.NewBrutalSender(ob.Congestion.BrutalBPS))
-				mgr.status.setState(stateConnected)
 			}
 		case "bbr":
 			profile, _ := bbr.ParseProfile(ob.Congestion.BBRProfile)
@@ -113,11 +156,6 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 					bbr.GetInitialPacketSize(conn.RemoteAddr()),
 					profile,
 				))
-				mgr.status.setState(stateConnected)
-			}
-		default:
-			onQUICConnect = func(conn *quic.Conn) {
-				mgr.status.setState(stateConnected)
 			}
 		}
 	}
@@ -132,6 +170,22 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	mgr.status.reset()
 	mgr.status.markStarted()
 	mgr.status.setState(stateConnecting)
+
+	// Extract DNS hijack targets from inbound settings
+	var dnsHijack4, dnsHijack6 net.IP
+	if settings, err := fc.ParseTunSettings(); err == nil {
+		for _, d := range settings.DNS {
+			ip := net.ParseIP(d)
+			if ip == nil {
+				continue
+			}
+			if ip.To4() != nil && dnsHijack4 == nil {
+				dnsHijack4 = ip
+			} else if ip.To4() == nil && dnsHijack6 == nil {
+				dnsHijack6 = ip
+			}
+		}
+	}
 
 	go func() {
 		defer close(mgr.done)
@@ -149,6 +203,26 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 			OnQUICConnect:     onQUICConnect,
 			Noise:             ob.Noise.ToNoiseConfig(),
 			PreNoise:          ob.PreNoise.ToNoiseConfig(),
+			DNSHijackTarget4:  dnsHijack4,
+			DNSHijackTarget6:  dnsHijack6,
+			OnStateChange: func(state string) {
+				switch state {
+				case "connecting":
+					mgr.status.setState(stateConnecting)
+				case "connected":
+					mgr.status.setState(stateConnected)
+				case "reconnecting":
+					mgr.status.setState(stateReconnecting)
+				case "error":
+					mgr.status.setState(stateError)
+				}
+				notifyState(state)
+			},
+			OnTraffic: func(sent, recv int64) {
+				mgr.status.bytesSent.Store(sent)
+				mgr.status.bytesRecv.Store(recv)
+				notifyTraffic(sent, recv)
+			},
 		})
 	}()
 
@@ -181,6 +255,7 @@ func StopTunnel() {
 		<-mgr.done
 	}
 	mgr.status.setState(stateStopped)
+	notifyState("stopped")
 	mgr.ctx = nil
 	mgr.cancel = nil
 	mgr.done = nil
