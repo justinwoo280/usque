@@ -1,3 +1,5 @@
+//go:build android
+
 package mobile
 
 import (
@@ -37,6 +39,6 @@ func CreateUDPSocket() int {
 // CloseSocket closes a raw file descriptor.
 func CloseSocket(fd int) {
 	if fd >= 0 {
-		syscall.Close(fd)
+		_ = syscall.Close(fd)
 	}
 }

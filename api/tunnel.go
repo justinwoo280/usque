@@ -66,6 +66,9 @@ type TunnelDevice interface {
 	ReadPacket(buf []byte) (int, error)
 	// WritePacket writes a packet to the device.
 	WritePacket(pkt []byte) error
+	// Close releases the underlying device resources.
+	// Safe to call concurrently with ReadPacket/WritePacket; causes blocked reads to fail.
+	Close() error
 }
 
 // NetstackAdapter wraps a tun.Device (e.g. from netstack) to satisfy TunnelDevice.
@@ -100,6 +103,10 @@ func (n *NetstackAdapter) WritePacket(pkt []byte) error {
 	// Write expects a slice of packet buffers.
 	_, err := n.dev.Write([][]byte{pkt}, 0)
 	return err
+}
+
+func (n *NetstackAdapter) Close() error {
+	return nil
 }
 
 // NewNetstackAdapter creates a new NetstackAdapter.
@@ -140,6 +147,10 @@ func (w *WaterAdapter) WritePacket(pkt []byte) error {
 	return err
 }
 
+func (w *WaterAdapter) Close() error {
+	return w.iface.Close()
+}
+
 // NewWaterAdapter creates a new WaterAdapter.
 func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 	return &WaterAdapter{iface: iface}
@@ -158,6 +169,10 @@ func (f *FdAdapter) ReadPacket(buf []byte) (int, error) {
 func (f *FdAdapter) WritePacket(pkt []byte) error {
 	_, err := f.file.Write(pkt)
 	return err
+}
+
+func (f *FdAdapter) Close() error {
+	return f.file.Close()
 }
 
 // NewFdAdapter creates a new FdAdapter from a raw file descriptor.

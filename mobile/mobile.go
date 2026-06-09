@@ -1,3 +1,5 @@
+//go:build android
+
 package mobile
 
 import (
@@ -70,6 +72,7 @@ type tunnelManager struct {
 	cancel context.CancelFunc
 	status *tunnelStatus
 	done   chan struct{}
+	device api.TunnelDevice
 }
 
 // StartTunnel starts the MASQUE tunnel engine.
@@ -167,6 +170,7 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	mgr.ctx = ctx
 	mgr.cancel = cancel
 	mgr.done = make(chan struct{})
+	mgr.device = tunDev
 	mgr.status.reset()
 	mgr.status.markStarted()
 	mgr.status.setState(stateConnecting)
@@ -250,6 +254,9 @@ func StopTunnel() {
 		return
 	}
 	log.Println("mobile: stopping tunnel engine")
+	if mgr.device != nil {
+		_ = mgr.device.Close()
+	}
 	mgr.cancel()
 	if mgr.done != nil {
 		<-mgr.done
@@ -259,6 +266,7 @@ func StopTunnel() {
 	mgr.ctx = nil
 	mgr.cancel = nil
 	mgr.done = nil
+	mgr.device = nil
 }
 
 // GetStatus returns a JSON string describing the current tunnel state.

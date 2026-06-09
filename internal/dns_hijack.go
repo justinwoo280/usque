@@ -340,23 +340,3 @@ func udpDstPort(pkt []byte) uint16 {
 	}
 	return binary.BigEndian.Uint16(pkt[off+2:])
 }
-
-func srcIP(pkt []byte) net.IP {
-	if pkt[0]>>4 == 4 {
-		return net.IP(pkt[12:16])
-	}
-	return net.IP(pkt[8:24])
-}
-
-func dstIP(pkt []byte) net.IP {
-	if pkt[0]>>4 == 4 {
-		return net.IP(pkt[16:20])
-	}
-	return net.IP(pkt[24:40])
-}
-
-func copyIP(ip net.IP) net.IP {
-	c := make(net.IP, len(ip))
-	copy(c, ip)
-	return c
-}
