@@ -30,6 +30,7 @@ type TunnelListener interface {
 var (
 	mgr      *tunnelManager
 	mgrOnce  sync.Once
+	mgrMu    sync.Mutex
 	listener TunnelListener
 	listMu   sync.RWMutex
 )
@@ -68,11 +69,12 @@ func notifyTraffic(sent, recv int64) {
 }
 
 type tunnelManager struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	status *tunnelStatus
-	done   chan struct{}
-	device api.TunnelDevice
+	ctx      context.Context
+	cancel   context.CancelFunc
+	status   *tunnelStatus
+	done     chan struct{}
+	device   api.TunnelDevice
+	stopping bool
 }
 
 // StartTunnel starts the MASQUE tunnel engine.
@@ -90,9 +92,12 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 		}
 	})
 
+	mgrMu.Lock()
 	if mgr.ctx != nil {
+		mgrMu.Unlock()
 		return "tunnel already running"
 	}
+	mgrMu.Unlock()
 
 	fc, err := parseConfigJSON(configJSON)
 	if err != nil {
@@ -167,6 +172,13 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	reconnect := config.ParseDuration(ob.ReconnectDelay, 1*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	mgrMu.Lock()
+	if mgr.ctx != nil {
+		cancel()
+		mgrMu.Unlock()
+		return "tunnel already running"
+	}
 	mgr.ctx = ctx
 	mgr.cancel = cancel
 	mgr.done = make(chan struct{})
@@ -174,6 +186,7 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	mgr.status.reset()
 	mgr.status.markStarted()
 	mgr.status.setState(stateConnecting)
+	mgrMu.Unlock()
 
 	// Extract DNS hijack targets from inbound settings
 	var dnsHijack4, dnsHijack6 net.IP
@@ -250,23 +263,39 @@ func parseConfigJSON(jsonStr string) (*config.FullConfig, error) {
 
 // StopTunnel stops the running tunnel engine and releases resources.
 func StopTunnel() {
-	if mgr == nil || mgr.cancel == nil {
+	mgrMu.Lock()
+	if mgr == nil || mgr.cancel == nil || mgr.stopping {
+		mgrMu.Unlock()
 		return
 	}
+	mgr.stopping = true
+	cancel := mgr.cancel
+	done := mgr.done
+	device := mgr.device
+	mgrMu.Unlock()
+
 	log.Println("mobile: stopping tunnel engine")
-	if mgr.device != nil {
-		_ = mgr.device.Close()
+
+	cancel()
+
+	if done != nil {
+		<-done
 	}
-	mgr.cancel()
-	if mgr.done != nil {
-		<-mgr.done
+
+	if device != nil {
+		_ = device.Close()
 	}
+
+	mgrMu.Lock()
 	mgr.status.setState(stateStopped)
-	notifyState("stopped")
 	mgr.ctx = nil
 	mgr.cancel = nil
 	mgr.done = nil
 	mgr.device = nil
+	mgr.stopping = false
+	mgrMu.Unlock()
+
+	notifyState("stopped")
 }
 
 // GetStatus returns a JSON string describing the current tunnel state.
