@@ -274,11 +274,6 @@ func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
 	return pkt
 }
 
-// udpOffV4 returns the UDP header offset for an IPv4 packet (IHL-based).
-func udpOffV4(pkt []byte) int {
-	return int(pkt[0]&0x0f) * 4
-}
-
 // --- IPv4 helpers ---
 
 func isFragmentedIPv4(pkt []byte) bool {
