@@ -412,3 +412,237 @@ func TestDNSRewriter_ConcurrentQueries(t *testing.T) {
 	verifyIPv4Checksum(t, respC)
 	verifyUDPChecksum(t, respC)
 }
+
+func TestDNSRewriter_RingBufferEviction(t *testing.T) {
+	hijackDst := net.ParseIP("1.1.1.1")
+	r := NewDNSRewriter(hijackDst, nil)
+
+	// All source ports with &0xf == 0 land in shard 0.
+	// Fill shard 0 to capacity (maxPerShard = 256).
+	type queryInfo struct {
+		origDst net.IP
+		pkt     []byte
+		port    uint16
+	}
+	var queries []queryInfo
+
+	for i := 0; i < maxPerShard; i++ {
+		port := uint16(i * numShards)
+		origDst := net.IPv4(203, 0, byte(i>>8), byte(i&0xff))
+		srcIP := net.ParseIP("10.0.0.1")
+		pkt := buildIPv4UDP(srcIP, origDst, port, 53, []byte{byte(i)})
+		r.RewriteQuery(pkt)
+		queries = append(queries, queryInfo{origDst: origDst, pkt: pkt, port: port})
+	}
+
+	// One more query to the same shard triggers eviction of the oldest.
+	overflowPort := uint16(maxPerShard * numShards)
+	overflowDst := net.IPv4(203, 0, 255, 255)
+	srcIP := net.ParseIP("10.0.0.1")
+	overflowPkt := buildIPv4UDP(srcIP, overflowDst, overflowPort, 53, []byte{0xFF})
+	r.RewriteQuery(overflowPkt)
+
+	// The oldest entry (i=0, port 0) should be evicted.
+	resp0 := buildIPv4UDP(hijackDst, srcIP, 53, queries[0].port, []byte{0x80})
+	r.RewriteResponse(resp0)
+	if net.IP(resp0[12:16]).Equal(queries[0].origDst) {
+		t.Errorf("oldest entry (port %d) should have been evicted but was still resolved", queries[0].port)
+	}
+
+	// The second entry (i=1) should still be resolvable.
+	resp1 := buildIPv4UDP(hijackDst, srcIP, 53, queries[1].port, []byte{0x81})
+	r.RewriteResponse(resp1)
+	if !net.IP(resp1[12:16]).Equal(queries[1].origDst) {
+		t.Errorf("second entry should still resolve: got %v, want %v",
+			net.IP(resp1[12:16]), queries[1].origDst)
+	}
+
+	// The last entry before overflow should still resolve.
+	last := len(queries) - 1
+	respLast := buildIPv4UDP(hijackDst, srcIP, 53, queries[last].port, []byte{0x82})
+	r.RewriteResponse(respLast)
+	if !net.IP(respLast[12:16]).Equal(queries[last].origDst) {
+		t.Errorf("last pre-overflow entry should resolve: got %v, want %v",
+			net.IP(respLast[12:16]), queries[last].origDst)
+	}
+}
+
+// buildIPv6UDPWithExtHdr constructs an IPv6+UDP packet with a Hop-by-Hop
+// extension header (8 bytes) between the IPv6 header and UDP header.
+func buildIPv6UDPWithExtHdr(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) []byte {
+	udpLen := 8 + len(payload)
+	hbhLen := 8
+	pkt := make([]byte, 40+hbhLen+udpLen)
+
+	pkt[0] = 0x60
+	binary.BigEndian.PutUint16(pkt[4:6], uint16(hbhLen+udpLen))
+	pkt[6] = 0   // Next Header: Hop-by-Hop Options
+	pkt[7] = 64  // Hop Limit
+	copy(pkt[8:24], srcIP.To16())
+	copy(pkt[24:40], dstIP.To16())
+
+	// Hop-by-Hop: next=UDP(17), hdrExtLen=0 → (0+1)*8=8 bytes total
+	pkt[40] = 17 // Next Header: UDP
+	pkt[41] = 0  // Hdr Ext Len: 0 → 8 bytes
+	// Pad6 option (type=1, len=4, zeros) to fill remaining 6 bytes
+	pkt[42] = 1
+	pkt[43] = 4
+
+	udpOff := 48
+	binary.BigEndian.PutUint16(pkt[udpOff:], srcPort)
+	binary.BigEndian.PutUint16(pkt[udpOff+2:], dstPort)
+	binary.BigEndian.PutUint16(pkt[udpOff+4:], uint16(udpLen))
+	pkt[udpOff+6] = 0
+	pkt[udpOff+7] = 0
+	copy(pkt[udpOff+8:], payload)
+
+	cs := computeUDPChecksum(pkt)
+	pkt[udpOff+6] = byte(cs >> 8)
+	pkt[udpOff+7] = byte(cs)
+
+	return pkt
+}
+
+func TestDNSRewriter_IPv6_ExtensionHeaders(t *testing.T) {
+	srcIP := net.ParseIP("fd00::1")
+	origDst := net.ParseIP("2001:4860:4860::8888")
+	hijackDst := net.ParseIP("2606:4700:4700::1111")
+	payload := []byte{0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00}
+
+	pkt := buildIPv6UDPWithExtHdr(srcIP, origDst, 54321, 53, payload)
+
+	r := NewDNSRewriter(nil, hijackDst)
+	r.RewriteQuery(pkt)
+
+	if !net.IP(pkt[24:40]).Equal(hijackDst) {
+		t.Errorf("IPv6 dst not rewritten with ext headers: got %v, want %v",
+			net.IP(pkt[24:40]), hijackDst)
+	}
+
+	verifyUDPChecksum(t, pkt)
+}
+
+func TestDNSRewriter_IPv6_ExtHeaders_Roundtrip(t *testing.T) {
+	srcIP := net.ParseIP("fd00::1")
+	origDst := net.ParseIP("2001:4860:4860::8888")
+	hijackDst := net.ParseIP("2606:4700:4700::1111")
+	payload := []byte{0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00}
+
+	r := NewDNSRewriter(nil, hijackDst)
+
+	query := buildIPv6UDPWithExtHdr(srcIP, origDst, 54321, 53, payload)
+	r.RewriteQuery(query)
+	if !net.IP(query[24:40]).Equal(hijackDst) {
+		t.Fatal("IPv6 query dst not rewritten with ext headers")
+	}
+
+	respPayload := []byte{0xAB, 0xCD, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01}
+	resp := buildIPv6UDPWithExtHdr(hijackDst, srcIP, 53, 54321, respPayload)
+	r.RewriteResponse(resp)
+
+	if !net.IP(resp[8:24]).Equal(origDst) {
+		t.Errorf("IPv6 response src not restored: got %v, want %v",
+			net.IP(resp[8:24]), origDst)
+	}
+
+	verifyUDPChecksum(t, resp)
+}
+
+func TestSkipIPv6ExtHeaders(t *testing.T) {
+	tests := []struct {
+		name       string
+		nextHeader byte
+		extData    []byte // bytes starting at offset 40
+		wantNH     byte
+		wantOff    int
+	}{
+		{
+			name:       "no extension (direct UDP)",
+			nextHeader: 17,
+			extData:    nil,
+			wantNH:     17,
+			wantOff:    40,
+		},
+		{
+			name:       "hop-by-hop then UDP",
+			nextHeader: 0,
+			extData: []byte{
+				17, 0, // next=UDP, hdrExtLen=0 → 8 bytes
+				1, 4, 0, 0, 0, 0, // Pad6
+			},
+			wantNH:  17,
+			wantOff: 48,
+		},
+		{
+			name:       "fragment then UDP",
+			nextHeader: 44,
+			extData: []byte{
+				17, 0, 0, 0, // next=UDP, reserved, fragOff+flags
+				0, 0, 0, 0, // identification
+			},
+			wantNH:  17,
+			wantOff: 48,
+		},
+		{
+			name:       "hop-by-hop + fragment then UDP",
+			nextHeader: 0,
+			extData: []byte{
+				44, 0,                   // HBH: next=Fragment, hdrExtLen=0 → 8 bytes
+				1, 4, 0, 0, 0, 0,       // Pad6
+				17, 0, 0, 0, 0, 0, 0, 0, // Fragment: next=UDP, 8 bytes
+			},
+			wantNH:  17,
+			wantOff: 56,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkt := make([]byte, 40+len(tt.extData)+8)
+			pkt[6] = tt.nextHeader
+			copy(pkt[40:], tt.extData)
+
+			nh, off := skipIPv6ExtHeaders(pkt, pkt[6], 40)
+			if nh != tt.wantNH {
+				t.Errorf("nextHeader: got %d, want %d", nh, tt.wantNH)
+			}
+			if off != tt.wantOff {
+				t.Errorf("offset: got %d, want %d", off, tt.wantOff)
+			}
+		})
+	}
+}
+
+func BenchmarkRewriteQuery_IPv4(b *testing.B) {
+	hijackDst := net.ParseIP("1.1.1.1")
+	r := NewDNSRewriter(hijackDst, nil)
+	srcIP := net.ParseIP("10.0.0.1")
+	origDst := net.ParseIP("203.0.113.1")
+	payload := make([]byte, 64)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		pkt := buildIPv4UDP(srcIP, origDst, uint16(i), 53, payload)
+		r.RewriteQuery(pkt)
+	}
+}
+
+func BenchmarkRewriteQuery_IPv6(b *testing.B) {
+	hijackDst := net.ParseIP("2606:4700:4700::1111")
+	r := NewDNSRewriter(nil, hijackDst)
+	srcIP := net.ParseIP("fd00::1")
+	origDst := net.ParseIP("2001:4860:4860::8888")
+	payload := make([]byte, 64)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		pkt := buildIPv6UDP(srcIP, origDst, uint16(i), 53, payload)
+		r.RewriteQuery(pkt)
+	}
+}

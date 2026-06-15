@@ -1,27 +1,41 @@
 package internal
 
 import (
-	"bytes"
 	"encoding/binary"
 	"net"
 	"sync"
+)
+
+const (
+	numShards   = 16
+	maxPerShard = 256
 )
 
 // DNSRewriter hijacks DNS packets at L3, rewriting the destination IP to a
 // configured DNS server on the outbound path and restoring the original IP on
 // the inbound path.
 //
-// The implementation is allocation-free on the hot path: map keys, map values,
-// and hijack target comparisons all use fixed-size byte arrays. This avoids GC
-// pressure from per-packet string/net.IP allocations that caused DNS latency.
+// State is partitioned into 16 shards keyed by source port to reduce lock
+// contention. Each shard uses a ring buffer for FIFO eviction so that a burst
+// of queries only drops the oldest entry rather than wiping all mappings.
+//
+// Checksum updates use RFC 1624 incremental adjustment: only the changed IP
+// words feed into the correction, making the update O(1) regardless of DNS
+// payload size.
 type DNSRewriter struct {
 	h4    [4]byte
 	h6    [16]byte
 	h4Set bool
 	h6Set bool
 
+	shards [numShards]shard
+}
+
+type shard struct {
 	mu      sync.Mutex
 	pending map[dnsQueryKey][16]byte
+	ring    [maxPerShard]dnsQueryKey
+	pos     int
 }
 
 type dnsQueryKey struct {
@@ -33,8 +47,9 @@ type dnsQueryKey struct {
 // NewDNSRewriter creates a DNSRewriter with separate IPv4 and IPv6 targets.
 // Either target may be nil; packets of that address family will pass through.
 func NewDNSRewriter(target4, target6 net.IP) *DNSRewriter {
-	r := &DNSRewriter{
-		pending: make(map[dnsQueryKey][16]byte),
+	r := &DNSRewriter{}
+	for i := range r.shards {
+		r.shards[i].pending = make(map[dnsQueryKey][16]byte)
 	}
 	if target4 != nil {
 		if v4 := target4.To4(); v4 != nil {
@@ -51,9 +66,13 @@ func NewDNSRewriter(target4, target6 net.IP) *DNSRewriter {
 	return r
 }
 
+func (r *DNSRewriter) shardFor(port uint16) *shard {
+	return &r.shards[port&(numShards-1)]
+}
+
 // RewriteQuery rewrites outbound DNS queries: changes the destination IP to
 // the hijack target matching the packet's address family and updates IP + UDP
-// checksums. Non-DNS packets are returned unchanged.
+// checksums incrementally. Non-DNS packets are returned unchanged.
 func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 	if !isUDP(pkt) || udpDstPort(pkt) != 53 {
 		return pkt
@@ -68,20 +87,44 @@ func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 		var key dnsQueryKey
 		key.v4 = true
 		copy(key.ip[:4], pkt[12:16])
-		key.port = binary.BigEndian.Uint16(pkt[udpOffV4(pkt):])
+		udpOff := udpOffset(pkt)
+		key.port = binary.BigEndian.Uint16(pkt[udpOff:])
 
 		var origDst [16]byte
 		copy(origDst[:4], pkt[16:20])
 
-		r.mu.Lock()
-		r.pending[key] = origDst
-		if len(r.pending) > 1024 {
-			r.pending = make(map[dnsQueryKey][16]byte)
+		s := r.shardFor(key.port)
+		s.mu.Lock()
+		if len(s.pending) >= maxPerShard {
+			delete(s.pending, s.ring[s.pos])
 		}
-		r.mu.Unlock()
+		s.ring[s.pos] = key
+		s.pos = (s.pos + 1) % maxPerShard
+		s.pending[key] = origDst
+		s.mu.Unlock()
 
+		oldW := [2]uint16{
+			binary.BigEndian.Uint16(pkt[16:18]),
+			binary.BigEndian.Uint16(pkt[18:20]),
+		}
 		copy(pkt[16:20], r.h4[:])
-		updateIPv4Checksum(pkt)
+		newW := [2]uint16{
+			binary.BigEndian.Uint16(pkt[16:18]),
+			binary.BigEndian.Uint16(pkt[18:20]),
+		}
+
+		cs := binary.BigEndian.Uint16(pkt[10:12])
+		cs = adjustChecksum(cs, oldW[:], newW[:])
+		pkt[10] = byte(cs >> 8)
+		pkt[11] = byte(cs)
+
+		udpCS := binary.BigEndian.Uint16(pkt[udpOff+6:])
+		udpCS = adjustChecksum(udpCS, oldW[:], newW[:])
+		if udpCS == 0 {
+			udpCS = 0xffff
+		}
+		pkt[udpOff+6] = byte(udpCS >> 8)
+		pkt[udpOff+7] = byte(udpCS)
 	} else {
 		if !r.h6Set {
 			return pkt
@@ -89,21 +132,37 @@ func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 
 		var key dnsQueryKey
 		copy(key.ip[:], pkt[8:24])
-		key.port = binary.BigEndian.Uint16(pkt[udpOffV6:])
+		udpOff := udpOffset(pkt)
+		key.port = binary.BigEndian.Uint16(pkt[udpOff:])
 
 		var origDst [16]byte
 		copy(origDst[:], pkt[24:40])
 
-		r.mu.Lock()
-		r.pending[key] = origDst
-		if len(r.pending) > 1024 {
-			r.pending = make(map[dnsQueryKey][16]byte)
+		s := r.shardFor(key.port)
+		s.mu.Lock()
+		if len(s.pending) >= maxPerShard {
+			delete(s.pending, s.ring[s.pos])
 		}
-		r.mu.Unlock()
+		s.ring[s.pos] = key
+		s.pos = (s.pos + 1) % maxPerShard
+		s.pending[key] = origDst
+		s.mu.Unlock()
 
+		var oldW, newW [8]uint16
+		for i := 0; i < 8; i++ {
+			oldW[i] = binary.BigEndian.Uint16(pkt[24+i*2:])
+		}
 		copy(pkt[24:40], r.h6[:])
+		for i := 0; i < 8; i++ {
+			newW[i] = binary.BigEndian.Uint16(pkt[24+i*2:])
+		}
+
+		udpCS := binary.BigEndian.Uint16(pkt[udpOff+6:])
+		udpCS = adjustChecksum(udpCS, oldW[:], newW[:])
+		pkt[udpOff+6] = byte(udpCS >> 8)
+		pkt[udpOff+7] = byte(udpCS)
 	}
-	updateUDPChecksum(pkt)
+
 	return pkt
 }
 
@@ -117,51 +176,101 @@ func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
 
 	v4 := pkt[0]>>4 == 4
 	if v4 {
-		if !r.h4Set || !bytes.Equal(pkt[12:16], r.h4[:]) {
+		if !r.h4Set {
+			return pkt
+		}
+		if pkt[12] != r.h4[0] || pkt[13] != r.h4[1] ||
+			pkt[14] != r.h4[2] || pkt[15] != r.h4[3] {
 			return pkt
 		}
 
 		var key dnsQueryKey
 		key.v4 = true
 		copy(key.ip[:4], pkt[16:20])
-		key.port = binary.BigEndian.Uint16(pkt[udpOffV4(pkt)+2:])
+		udpOff := udpOffset(pkt)
+		key.port = binary.BigEndian.Uint16(pkt[udpOff+2:])
 
-		r.mu.Lock()
-		origDst, ok := r.pending[key]
+		s := r.shardFor(key.port)
+		s.mu.Lock()
+		origDst, ok := s.pending[key]
 		if ok {
-			delete(r.pending, key)
+			delete(s.pending, key)
 		}
-		r.mu.Unlock()
+		s.mu.Unlock()
 
 		if !ok {
 			return pkt
 		}
 
+		oldW := [2]uint16{
+			binary.BigEndian.Uint16(pkt[12:14]),
+			binary.BigEndian.Uint16(pkt[14:16]),
+		}
 		copy(pkt[12:16], origDst[:4])
-		updateIPv4Checksum(pkt)
+		newW := [2]uint16{
+			binary.BigEndian.Uint16(pkt[12:14]),
+			binary.BigEndian.Uint16(pkt[14:16]),
+		}
+
+		cs := binary.BigEndian.Uint16(pkt[10:12])
+		cs = adjustChecksum(cs, oldW[:], newW[:])
+		pkt[10] = byte(cs >> 8)
+		pkt[11] = byte(cs)
+
+		udpCS := binary.BigEndian.Uint16(pkt[udpOff+6:])
+		udpCS = adjustChecksum(udpCS, oldW[:], newW[:])
+		if udpCS == 0 {
+			udpCS = 0xffff
+		}
+		pkt[udpOff+6] = byte(udpCS >> 8)
+		pkt[udpOff+7] = byte(udpCS)
 	} else {
-		if !r.h6Set || !bytes.Equal(pkt[8:24], r.h6[:]) {
+		if !r.h6Set {
+			return pkt
+		}
+		match := true
+		for i := 0; i < 16; i++ {
+			if pkt[8+i] != r.h6[i] {
+				match = false
+				break
+			}
+		}
+		if !match {
 			return pkt
 		}
 
 		var key dnsQueryKey
 		copy(key.ip[:], pkt[24:40])
-		key.port = binary.BigEndian.Uint16(pkt[udpOffV6+2:])
+		udpOff := udpOffset(pkt)
+		key.port = binary.BigEndian.Uint16(pkt[udpOff+2:])
 
-		r.mu.Lock()
-		origDst, ok := r.pending[key]
+		s := r.shardFor(key.port)
+		s.mu.Lock()
+		origDst, ok := s.pending[key]
 		if ok {
-			delete(r.pending, key)
+			delete(s.pending, key)
 		}
-		r.mu.Unlock()
+		s.mu.Unlock()
 
 		if !ok {
 			return pkt
 		}
 
+		var oldW, newW [8]uint16
+		for i := 0; i < 8; i++ {
+			oldW[i] = binary.BigEndian.Uint16(pkt[8+i*2:])
+		}
 		copy(pkt[8:24], origDst[:])
+		for i := 0; i < 8; i++ {
+			newW[i] = binary.BigEndian.Uint16(pkt[8+i*2:])
+		}
+
+		udpCS := binary.BigEndian.Uint16(pkt[udpOff+6:])
+		udpCS = adjustChecksum(udpCS, oldW[:], newW[:])
+		pkt[udpOff+6] = byte(udpCS >> 8)
+		pkt[udpOff+7] = byte(udpCS)
 	}
-	updateUDPChecksum(pkt)
+
 	return pkt
 }
 
@@ -169,8 +278,6 @@ func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
 func udpOffV4(pkt []byte) int {
 	return int(pkt[0]&0x0f) * 4
 }
-
-const udpOffV6 = 40
 
 // --- IPv4 helpers ---
 
@@ -182,17 +289,114 @@ func isFragmentedIPv4(pkt []byte) bool {
 	return fo&0x1FFF != 0
 }
 
-func updateIPv4Checksum(pkt []byte) {
-	ihl := int(pkt[0]&0x0f) * 4
-	if ihl < 20 || len(pkt) < ihl {
-		return
+// --- Incremental checksum (RFC 1624) ---
+
+func foldCarry(sum uint32) uint32 {
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
 	}
-	pkt[10] = 0
-	pkt[11] = 0
-	cs := ipChecksum(pkt[:ihl])
-	pkt[10] = byte(cs >> 8)
-	pkt[11] = byte(cs)
+	return sum
 }
+
+// adjustChecksum updates a one's-complement checksum incrementally.
+// HC' = ~(~HC + sum(~m) + sum(m'))
+func adjustChecksum(cs uint16, oldWords, newWords []uint16) uint16 {
+	sum := uint32(^cs)
+	for _, w := range oldWords {
+		sum += uint32(^w)
+	}
+	for _, w := range newWords {
+		sum += uint32(w)
+	}
+	return ^uint16(foldCarry(sum))
+}
+
+// --- IPv6 extension headers ---
+
+// skipIPv6ExtHeaders walks the IPv6 extension header chain. Returns the final
+// next-header value and the byte offset of the upper-layer protocol payload.
+func skipIPv6ExtHeaders(pkt []byte, nextHeader byte, off int) (byte, int) {
+	for {
+		switch nextHeader {
+		case 0, 43, 60, 135: // Hop-by-Hop, Routing, Destination Options, Mobility
+			if off+2 > len(pkt) {
+				return 0, -1
+			}
+			nextHeader = pkt[off]
+			hdrLen := int(pkt[off+1])*8 + 8
+			off += hdrLen
+			if off > len(pkt) {
+				return 0, -1
+			}
+		case 44: // Fragment
+			if off+8 > len(pkt) {
+				return 0, -1
+			}
+			nextHeader = pkt[off]
+			off += 8
+		case 51: // AH
+			if off+2 > len(pkt) {
+				return 0, -1
+			}
+			nextHeader = pkt[off]
+			hdrLen := (int(pkt[off+1]) + 2) * 4
+			off += hdrLen
+			if off > len(pkt) {
+				return 0, -1
+			}
+		default:
+			return nextHeader, off
+		}
+	}
+}
+
+// --- Packet field accessors ---
+
+func udpOffset(pkt []byte) int {
+	if len(pkt) < 1 {
+		return -1
+	}
+	if pkt[0]>>4 == 4 {
+		ihl := int(pkt[0]&0x0f) * 4
+		if ihl < 20 || len(pkt) < ihl+8 {
+			return -1
+		}
+		return ihl
+	}
+	if pkt[0]>>4 == 6 {
+		if len(pkt) < 48 {
+			return -1
+		}
+		nh, off := skipIPv6ExtHeaders(pkt, pkt[6], 40)
+		if off < 0 || nh != 17 || off+8 > len(pkt) {
+			return -1
+		}
+		return off
+	}
+	return -1
+}
+
+func isUDP(pkt []byte) bool {
+	return udpOffset(pkt) >= 0
+}
+
+func udpSrcPort(pkt []byte) uint16 {
+	off := udpOffset(pkt)
+	if off < 0 {
+		return 0
+	}
+	return binary.BigEndian.Uint16(pkt[off:])
+}
+
+func udpDstPort(pkt []byte) uint16 {
+	off := udpOffset(pkt)
+	if off < 0 {
+		return 0
+	}
+	return binary.BigEndian.Uint16(pkt[off+2:])
+}
+
+// --- Full checksum computation (test verification only) ---
 
 func ipChecksum(hdr []byte) uint16 {
 	var sum uint32
@@ -206,26 +410,6 @@ func ipChecksum(hdr []byte) uint16 {
 		sum = (sum & 0xffff) + (sum >> 16)
 	}
 	return ^uint16(sum)
-}
-
-// --- UDP checksum ---
-
-func updateUDPChecksum(pkt []byte) {
-	v4 := pkt[0]>>4 == 4
-	udpOff := udpOffset(pkt)
-	if udpOff < 0 || len(pkt) < udpOff+8 {
-		return
-	}
-
-	pkt[udpOff+6] = 0
-	pkt[udpOff+7] = 0
-
-	cs := computeUDPChecksum(pkt)
-	if v4 && cs == 0 {
-		cs = 0xffff
-	}
-	pkt[udpOff+6] = byte(cs >> 8)
-	pkt[udpOff+7] = byte(cs)
 }
 
 func computeUDPChecksum(pkt []byte) uint16 {
@@ -273,70 +457,4 @@ func pseudo16(b []byte) uint32 {
 		s += uint32(binary.BigEndian.Uint16(b[i:]))
 	}
 	return s
-}
-
-// --- Packet field accessors ---
-
-func isUDP(pkt []byte) bool {
-	if len(pkt) < 1 {
-		return false
-	}
-	v := pkt[0] >> 4
-	if v == 4 {
-		return isUDPv4(pkt)
-	}
-	if v == 6 {
-		return isUDPv6(pkt)
-	}
-	return false
-}
-
-func isUDPv4(pkt []byte) bool {
-	if len(pkt) < 20 {
-		return false
-	}
-	return pkt[9] == 17
-}
-
-func isUDPv6(pkt []byte) bool {
-	if len(pkt) < 40 {
-		return false
-	}
-	return pkt[6] == 17
-}
-
-func udpOffset(pkt []byte) int {
-	if len(pkt) < 1 {
-		return -1
-	}
-	if pkt[0]>>4 == 4 {
-		ihl := int(pkt[0]&0x0f) * 4
-		if ihl < 20 || len(pkt) < ihl+8 {
-			return -1
-		}
-		return ihl
-	}
-	if pkt[0]>>4 == 6 {
-		if len(pkt) < 48 {
-			return -1
-		}
-		return 40
-	}
-	return -1
-}
-
-func udpSrcPort(pkt []byte) uint16 {
-	off := udpOffset(pkt)
-	if off < 0 {
-		return 0
-	}
-	return binary.BigEndian.Uint16(pkt[off:])
-}
-
-func udpDstPort(pkt []byte) uint16 {
-	off := udpOffset(pkt)
-	if off < 0 {
-		return 0
-	}
-	return binary.BigEndian.Uint16(pkt[off+2:])
 }
