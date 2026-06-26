@@ -423,6 +423,13 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				readMu.Unlock()
 				if err != nil {
 					packetBufferPool.Put(buf)
+					// During teardown (pumpCtx cancelled, e.g. ctx cancelled by
+					// StopTunnel), the TUN device is closed and the read fails.
+					// Don't push a redundant error into errChan — the ctx-shutdown
+					// watcher has already signalled the supervisor to reconnect.
+					if pumpCtx.Err() != nil {
+						return
+					}
 					errChan <- fmt.Errorf("failed to read from TUN device: %w", err)
 					return
 				}
@@ -434,6 +441,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
 					packetBufferPool.Put(buf)
+					if pumpCtx.Err() != nil {
+						return
+					}
 					if errors.As(err, new(*connectip.CloseError)) {
 						errChan <- fmt.Errorf("connection closed while writing to IP connection: %w", err)
 						return
@@ -449,6 +459,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 				if len(icmp) > 0 {
 					if err := cfg.Device.WritePacket(icmp); err != nil {
+						if pumpCtx.Err() != nil {
+							return
+						}
 						if errors.As(err, new(*connectip.CloseError)) {
 							errChan <- fmt.Errorf("connection closed while writing ICMP to TUN device: %w", err)
 							return
@@ -466,6 +479,12 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			for {
 				n, err := ipConn.ReadPacket(buf, true)
 				if err != nil {
+					// During teardown the ctx-shutdown watcher closes ipConn,
+					// so the read fails with a close error. Exit silently — the
+					// supervisor is already tearing this cycle down.
+					if pumpCtx.Err() != nil {
+						return
+					}
 					if cfg.UseHTTP2 {
 						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
 						return
@@ -479,6 +498,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				}
 				dnsRewriter.RewriteResponse(buf[:n])
 				if err := cfg.Device.WritePacket(buf[:n]); err != nil {
+					if pumpCtx.Err() != nil {
+						return
+					}
 					errChan <- fmt.Errorf("failed to write to TUN device: %w", err)
 					return
 				}
