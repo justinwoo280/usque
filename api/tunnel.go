@@ -386,6 +386,29 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		var wg sync.WaitGroup
 		var readMu sync.Mutex
 
+		// ctxShutdown watches the parent context. When it is cancelled (e.g. via
+		// StopTunnel), we tear down the pumps and the IP connection so the
+		// blocked `err = <-errChan` below unblocks immediately instead of
+		// waiting for a QUIC keepalive/idle timeout (~30s). The error is
+		// injected into errChan; the normal cleanup path handles teardown.
+		ctxShutdownDone := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				cancelPumps()
+				_ = ipConn.Close()
+				select {
+				case errChan <- fmt.Errorf("tunnel context cancelled: %w", ctx.Err()):
+				default:
+				}
+				// Do NOT close ctxShutdownDone here: the cleanup path owns the
+				// single close. Wait for it instead, so this goroutine exits
+				// without risking a double-close panic when ctx is cancelled.
+				<-ctxShutdownDone
+			case <-ctxShutdownDone:
+			}
+		}()
+
 		wg.Add(2)
 
 		go func() {
@@ -483,6 +506,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		cancelPumps()
 		_ = ipConn.Close()
+		close(ctxShutdownDone) // stop the context-shutdown watcher for this cycle
 
 		done := make(chan struct{})
 		go func() {

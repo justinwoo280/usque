@@ -276,14 +276,22 @@ func StopTunnel() {
 
 	log.Println("mobile: stopping tunnel engine")
 
+	// Cancel the context first so MaintainTunnel's reconnect sleeps and any
+	// ctx-aware dials abort immediately.
 	cancel()
+
+	// Close the TUN device BEFORE waiting on <-done. This unblocks the device
+	// reader pump (parked in Device.ReadPacket), which pushes into errChan,
+	// tears down ipConn and unblocks the network reader — so MaintainTunnel
+	// returns promptly instead of blocking for a QUIC keepalive/idle timeout
+	// (~30s). Closing before <-done is safe: TunnelDevice.Close is documented
+	// as concurrency-safe with ReadPacket/WritePacket.
+	if device != nil {
+		_ = device.Close()
+	}
 
 	if done != nil {
 		<-done
-	}
-
-	if device != nil {
-		_ = device.Close()
 	}
 
 	mgrMu.Lock()
