@@ -74,6 +74,7 @@ type tunnelManager struct {
 	status   *tunnelStatus
 	done     chan struct{}
 	device   api.TunnelDevice
+	udpConn  *net.UDPConn // Go-owned dup of the caller's UDP fd; closed on stop
 	stopping bool
 }
 
@@ -183,6 +184,7 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	mgr.cancel = cancel
 	mgr.done = make(chan struct{})
 	mgr.device = tunDev
+	mgr.udpConn = udpConn
 	mgr.status.reset()
 	mgr.status.markStarted()
 	mgr.status.setState(stateConnecting)
@@ -272,6 +274,7 @@ func StopTunnel() {
 	cancel := mgr.cancel
 	done := mgr.done
 	device := mgr.device
+	udpConn := mgr.udpConn
 	mgrMu.Unlock()
 
 	log.Println("mobile: stopping tunnel engine")
@@ -290,8 +293,21 @@ func StopTunnel() {
 		_ = device.Close()
 	}
 
+	// Wait for the engine goroutine (MaintainTunnel) to FULLY exit before
+	// releasing any fds. This is the #1 correctness point: the reader goroutine
+	// may still be parked in FdAdapter.ReadPacket on the TUN fd; only once
+	// <-done returns is it guaranteed no goroutine touches the TUN fd or udpConn
+	// anymore, so it is safe for the caller to reuse/close those fd numbers.
 	if done != nil {
 		<-done
+	}
+
+	// Now that the engine has exited, close the Go-owned dup of the UDP fd.
+	// MaintainTunnel never closes a caller-supplied UDPConn (cfg.UDPConn != nil),
+	// so if we don't close our dup here it leaks. The caller still owns and
+	// closes the ORIGINAL udp fd separately.
+	if udpConn != nil {
+		_ = udpConn.Close()
 	}
 
 	mgrMu.Lock()
@@ -300,6 +316,7 @@ func StopTunnel() {
 	mgr.cancel = nil
 	mgr.done = nil
 	mgr.device = nil
+	mgr.udpConn = nil
 	mgr.stopping = false
 	mgrMu.Unlock()
 
