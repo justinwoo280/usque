@@ -74,7 +74,8 @@ func (r *DNSRewriter) shardFor(port uint16) *shard {
 // the hijack target matching the packet's address family and updates IP + UDP
 // checksums incrementally. Non-DNS packets are returned unchanged.
 func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
-	if !isUDP(pkt) || udpDstPort(pkt) != 53 {
+	udpOff := udpOffset(pkt)
+	if udpOff < 0 || binary.BigEndian.Uint16(pkt[udpOff+2:]) != 53 {
 		return pkt
 	}
 
@@ -87,7 +88,6 @@ func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 		var key dnsQueryKey
 		key.v4 = true
 		copy(key.ip[:4], pkt[12:16])
-		udpOff := udpOffset(pkt)
 		key.port = binary.BigEndian.Uint16(pkt[udpOff:])
 
 		var origDst [16]byte
@@ -132,7 +132,6 @@ func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 
 		var key dnsQueryKey
 		copy(key.ip[:], pkt[8:24])
-		udpOff := udpOffset(pkt)
 		key.port = binary.BigEndian.Uint16(pkt[udpOff:])
 
 		var origDst [16]byte
@@ -170,7 +169,8 @@ func (r *DNSRewriter) RewriteQuery(pkt []byte) []byte {
 // the original query destination so the application receives a reply from the
 // IP it originally queried.
 func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
-	if !isUDP(pkt) || udpSrcPort(pkt) != 53 {
+	udpOff := udpOffset(pkt)
+	if udpOff < 0 || binary.BigEndian.Uint16(pkt[udpOff:]) != 53 {
 		return pkt
 	}
 
@@ -187,7 +187,6 @@ func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
 		var key dnsQueryKey
 		key.v4 = true
 		copy(key.ip[:4], pkt[16:20])
-		udpOff := udpOffset(pkt)
 		key.port = binary.BigEndian.Uint16(pkt[udpOff+2:])
 
 		s := r.shardFor(key.port)
@@ -241,7 +240,6 @@ func (r *DNSRewriter) RewriteResponse(pkt []byte) []byte {
 
 		var key dnsQueryKey
 		copy(key.ip[:], pkt[24:40])
-		udpOff := udpOffset(pkt)
 		key.port = binary.BigEndian.Uint16(pkt[udpOff+2:])
 
 		s := r.shardFor(key.port)

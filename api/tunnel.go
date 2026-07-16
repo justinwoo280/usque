@@ -422,16 +422,19 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		go func() {
 			defer wg.Done()
+			buf := packetBufferPool.Get()
+			defer packetBufferPool.Put(buf)
+			// Pre-compute once: if neither family is blocked, skip the per-packet
+			// black-hole switch entirely (the common case — both stacks enabled).
+			blockActive := cfg.BlockIPv4 || cfg.BlockIPv6
 			for {
 				if pumpCtx.Err() != nil {
 					return
 				}
-				buf := packetBufferPool.Get()
 				readMu.Lock()
 				n, err := cfg.Device.ReadPacket(buf)
 				readMu.Unlock()
 				if err != nil {
-					packetBufferPool.Put(buf)
 					// During teardown (pumpCtx cancelled, e.g. ctx cancelled by
 					// StopTunnel), the TUN device is closed and the read fails.
 					// Don't push a redundant error into errChan — the ctx-shutdown
@@ -443,7 +446,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					return
 				}
 				if pumpCtx.Err() != nil {
-					packetBufferPool.Put(buf)
 					return
 				}
 				// Black-hole packets of a disabled address family. The default
@@ -452,16 +454,14 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				// of tunneling them — making the stack unreachable (fail-fast)
 				// with zero leak, on every platform, without relying on per-OS
 				// route/allowFamily tricks.
-				if n >= 1 {
+				if blockActive && n >= 1 {
 					switch buf[0] >> 4 {
 					case 4:
 						if cfg.BlockIPv4 {
-							packetBufferPool.Put(buf)
 							continue
 						}
 					case 6:
 						if cfg.BlockIPv6 {
-							packetBufferPool.Put(buf)
 							continue
 						}
 					}
@@ -469,7 +469,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				dnsRewriter.RewriteQuery(buf[:n])
 				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
-					packetBufferPool.Put(buf)
 					if pumpCtx.Err() != nil {
 						return
 					}
@@ -484,7 +483,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				if cfg.OnTraffic != nil {
 					cfg.OnTraffic(totalSent, totalRecv)
 				}
-				packetBufferPool.Put(buf)
 
 				if len(icmp) > 0 {
 					if err := cfg.Device.WritePacket(icmp); err != nil {
