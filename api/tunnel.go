@@ -233,6 +233,15 @@ type MaintainTunnelConfig struct {
 	DNSHijackTarget4 net.IP
 	// DNSHijackTarget6 is the IPv6 DNS server IP to rewrite outbound DNS queries to.
 	DNSHijackTarget6 net.IP
+	// BlockIPv4, when true, black-holes all IPv4 packets read from the TUN
+	// device: they are dropped at the tunnel ingress instead of being forwarded.
+	// Used when the IPv4 stack is disabled so that IPv4 traffic is unreachable
+	// (fails fast) rather than leaking out a physical interface or being tunneled
+	// to an endpoint that may have no IPv4 egress. The default route is still
+	// pointed at the TUN so the kernel hands us the packets to drop.
+	BlockIPv4 bool
+	// BlockIPv6, when true, black-holes all IPv6 packets read from the TUN device.
+	BlockIPv6 bool
 	// OnStateChange is called on tunnel lifecycle transitions.
 	// States: "connecting", "connected", "reconnecting", "error".
 	// Used by mobile bindings to push state updates to the UI.
@@ -436,6 +445,26 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				if pumpCtx.Err() != nil {
 					packetBufferPool.Put(buf)
 					return
+				}
+				// Black-hole packets of a disabled address family. The default
+				// route for the disabled stack is still pointed at the TUN (so
+				// the kernel hands us its packets), but we drop them here instead
+				// of tunneling them — making the stack unreachable (fail-fast)
+				// with zero leak, on every platform, without relying on per-OS
+				// route/allowFamily tricks.
+				if n >= 1 {
+					switch buf[0] >> 4 {
+					case 4:
+						if cfg.BlockIPv4 {
+							packetBufferPool.Put(buf)
+							continue
+						}
+					case 6:
+						if cfg.BlockIPv6 {
+							packetBufferPool.Put(buf)
+							continue
+						}
+					}
 				}
 				dnsRewriter.RewriteQuery(buf[:n])
 				icmp, err := ipConn.WritePacket(buf[:n])

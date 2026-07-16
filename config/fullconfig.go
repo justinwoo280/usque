@@ -227,6 +227,29 @@ func (fc *FullConfig) ParseTunSettings() (TunInboundSettings, error) {
 	if len(s.DNS) == 0 {
 		s.DNS = []string{"1.1.1.1", "2606:4700:4700::1111"}
 	}
+	// The IPv4/IPv6 fields are plain bools whose zero value (false) is
+	// indistinguishable from an absent JSON key. A disabled stack is now
+	// black-holed at the TUN, so a missing key must NOT be misread as "disable"
+	// (which would black-hole a stack the user never opted out of, or both —
+	// killing all connectivity). Detect presence via a pointer-typed probe and
+	// default absent keys to enabled (true).
+	var probe struct {
+		IPv4 *bool `json:"ipv4"`
+		IPv6 *bool `json:"ipv6"`
+	}
+	if err := json.Unmarshal(fc.Inbound.Settings, &probe); err == nil {
+		if probe.IPv4 == nil {
+			s.IPv4 = true
+		}
+		if probe.IPv6 == nil {
+			s.IPv6 = true
+		}
+	} else {
+		// Malformed settings: fail safe to both stacks enabled rather than
+		// black-holing everything.
+		s.IPv4 = true
+		s.IPv6 = true
+	}
 	return s, nil
 }
 

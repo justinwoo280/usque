@@ -68,6 +68,19 @@ func (m *windowsRouteManager) Setup() error {
 		log.Printf("Warning: DNS setup failed: %v", err)
 	}
 
+	// Prevent DNS leaks via Windows smart multi-homed name resolution: install
+	// WFP filters that block all port-53 traffic except to our tunnel DNS
+	// servers. Setting DNS on the TUN interface alone is insufficient because
+	// Windows queries every interface's DNS in parallel, and the physical NIC's
+	// queries never enter the TUN (so the L3 hijack rewriter can't catch them).
+	if len(m.cfg.DNSServers) > 0 {
+		if err := enableDNSFirewall(m.cfg.DNSServers); err != nil {
+			log.Printf("Warning: DNS leak prevention (WFP) failed: %v", err)
+		} else {
+			log.Printf("DNS leak prevention active (WFP): only %d server(s) permitted on port 53", len(m.cfg.DNSServers))
+		}
+	}
+
 	if err := flushResolverCache(); err != nil {
 		log.Printf("Warning: failed to flush DNS cache: %v", err)
 	}
@@ -77,6 +90,10 @@ func (m *windowsRouteManager) Setup() error {
 }
 
 func (m *windowsRouteManager) Cleanup() error {
+	// Tear down the WFP DNS-leak filters first so name resolution is restored
+	// immediately, even if later route/DNS cleanup steps fail.
+	disableDNSFirewall()
+
 	if m.changeCallback != nil {
 		if err := m.changeCallback.Unregister(); err != nil {
 			log.Printf("Warning: failed to unregister interface change callback: %v", err)
@@ -92,12 +109,10 @@ func (m *windowsRouteManager) Cleanup() error {
 		_ = exec.Command("route", "delete", m.cfg.EndpointIP.String(), "mask", mask).Run()
 	}
 
-	if m.cfg.EnableIPv4 {
-		_ = m.luid.FlushRoutes(windows.AF_INET)
-	}
-	if m.cfg.EnableIPv6 {
-		_ = m.luid.FlushRoutes(windows.AF_INET6)
-	}
+	// Both families' routes are always installed now (disabled stacks are
+	// black-holed via the TUN), so flush both on cleanup.
+	_ = m.luid.FlushRoutes(windows.AF_INET)
+	_ = m.luid.FlushRoutes(windows.AF_INET6)
 
 	if err := flushResolverCache(); err != nil {
 		log.Printf("Warning: failed to flush DNS cache: %v", err)
@@ -173,21 +188,21 @@ func addEndpointBypass(endpointIP net.IP, gateway, gwIface string) error {
 func (m *windowsRouteManager) setupRoutes() error {
 	var routes []winipcfg.RouteData
 
-	if m.cfg.EnableIPv4 {
-		routes = append(routes, winipcfg.RouteData{
-			Destination: netip.MustParsePrefix("0.0.0.0/0"),
-			NextHop:     netip.IPv4Unspecified(),
-			Metric:      0,
-		})
-	}
-
-	if m.cfg.EnableIPv6 {
-		routes = append(routes, winipcfg.RouteData{
-			Destination: netip.MustParsePrefix("::/0"),
-			NextHop:     netip.IPv6Unspecified(),
-			Metric:      0,
-		})
-	}
+	// Point BOTH default routes at the TUN regardless of which stacks are
+	// enabled. A disabled stack's packets are then pulled into the TUN and
+	// black-holed by the engine at the tunnel ingress, instead of falling back
+	// to the physical NIC's default route (the previous leak). This unifies the
+	// disable-stack behaviour with Android/Linux.
+	routes = append(routes, winipcfg.RouteData{
+		Destination: netip.MustParsePrefix("0.0.0.0/0"),
+		NextHop:     netip.IPv4Unspecified(),
+		Metric:      0,
+	})
+	routes = append(routes, winipcfg.RouteData{
+		Destination: netip.MustParsePrefix("::/0"),
+		NextHop:     netip.IPv6Unspecified(),
+		Metric:      0,
+	})
 
 	if len(routes) > 0 {
 		routePtrs := make([]*winipcfg.RouteData, len(routes))

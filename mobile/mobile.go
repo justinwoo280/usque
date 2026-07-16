@@ -190,9 +190,14 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	mgr.status.setState(stateConnecting)
 	mgrMu.Unlock()
 
-	// Extract DNS hijack targets from inbound settings
+	// Extract DNS hijack targets and per-family enable flags from inbound settings.
 	var dnsHijack4, dnsHijack6 net.IP
+	// Default to both stacks enabled; ParseTunSettings applies config defaults
+	// (ipv4/ipv6 both true) for the legacy/empty case.
+	blockV4, blockV6 := false, false
 	if settings, err := fc.ParseTunSettings(); err == nil {
+		blockV4 = !settings.IPv4
+		blockV6 = !settings.IPv6
 		for _, d := range settings.DNS {
 			ip := net.ParseIP(d)
 			if ip == nil {
@@ -224,6 +229,8 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 			PreNoise:          ob.PreNoise.ToNoiseConfig(),
 			DNSHijackTarget4:  dnsHijack4,
 			DNSHijackTarget6:  dnsHijack6,
+			BlockIPv4:         blockV4,
+			BlockIPv6:         blockV6,
 			OnStateChange: func(state string) {
 				switch state {
 				case "connecting":

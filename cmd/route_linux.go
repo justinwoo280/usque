@@ -64,7 +64,13 @@ func (m *linuxRouteManager) setupRoutes() error {
 		return fmt.Errorf("find interface %s: %w", m.cfg.InterfaceName, err)
 	}
 
-	if m.cfg.EnableIPv4 {
+	// Route BOTH families' default routes into the tunnel table regardless of
+	// which stacks are enabled. A disabled stack's packets are pulled into the
+	// TUN (never leaking to a physical interface) and black-holed by the engine
+	// at the tunnel ingress. This keeps the disable-stack semantics uniform with
+	// the other platforms instead of leaving the disabled family on the main
+	// table (physical NIC).
+	{
 		route := &netlink.Route{
 			LinkIndex: link.Attrs().Index,
 			Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
@@ -75,7 +81,7 @@ func (m *linuxRouteManager) setupRoutes() error {
 		}
 	}
 
-	if m.cfg.EnableIPv6 {
+	{
 		route := &netlink.Route{
 			LinkIndex: link.Attrs().Index,
 			Dst:       &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
@@ -111,7 +117,10 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 	priority := m.cfg.RuleIndex
 	nopPriority := priority + 20
 
-	if m.cfg.EnableIPv4 {
+	// Build policy rules for BOTH families unconditionally so a disabled stack
+	// is routed into the tunnel table (and black-holed by the engine) rather
+	// than falling through to the main table / physical NIC.
+	{
 		// Default: send all traffic through tunnel table (including DNS)
 		rule := netlink.NewRule()
 		rule.Priority = priority
@@ -161,7 +170,7 @@ func (m *linuxRouteManager) buildRules() []*netlink.Rule {
 		priority++
 	}
 
-	if m.cfg.EnableIPv6 {
+	{
 		// Default: tunnel table (including DNS)
 		rule := netlink.NewRule()
 		rule.Priority = priority

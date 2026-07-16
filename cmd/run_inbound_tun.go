@@ -143,6 +143,11 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 	ob.maintainCfg.MTU = settings.MTU
 	ob.maintainCfg.HookEnv = hookEnv
 	ob.maintainCfg.InterfaceUpdater = updater
+	// Black-hole a disabled stack at the TUN ingress (fail-fast, zero leak).
+	// The route managers still point both default routes at the TUN so the
+	// kernel delivers the disabled stack's packets to us to drop.
+	ob.maintainCfg.BlockIPv4 = !settings.IPv4
+	ob.maintainCfg.BlockIPv6 = !settings.IPv6
 
 	if len(settings.DNS) > 0 {
 		for _, d := range settings.DNS {
