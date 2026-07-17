@@ -56,6 +56,12 @@ var (
 // On IPv6, the minimum MTU of a link is 1280 bytes.
 const minMTU = 1280
 
+// The encapsulation overhead between the raw IP packet and the QUIC datagram
+// payload. The QUIC datagram carries: quarter_stream_id (varint, 1 byte for
+// stream 0) + context_id (varint, 1 byte for context 0) = 2 bytes. We use this
+// to convert MaxDatagramPayloadSize into an effective IP-layer MTU.
+const datagramOverhead = 2
+
 // Conn is a connection that proxies IP packets over HTTP/3.
 type Conn struct {
 	str    http3Stream
@@ -386,7 +392,16 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	if err := c.str.SendDatagram(data); err != nil {
 		var errDTL *quic.DatagramTooLargeError
 		if errors.As(err, &errDTL) {
-			icmpPacket, err := composeICMPTooLargePacket(b, minMTU)
+			// Use the actual QUIC max datagram payload size to compute the
+			// effective IP-layer MTU. This lets the OS cache an accurate
+			// path MTU instead of falling back to a hardcoded minimum.
+			effectiveMTU := int(errDTL.MaxDatagramPayloadSize) - datagramOverhead
+			if effectiveMTU < minMTU {
+				effectiveMTU = minMTU
+			}
+			log.Printf("packet too large for QUIC datagram (max payload %d), sending ICMP Packet Too Big with MTU=%d",
+				errDTL.MaxDatagramPayloadSize, effectiveMTU)
+			icmpPacket, err := composeICMPTooLargePacket(b, effectiveMTU)
 			if err != nil {
 				log.Printf("failed to compose ICMP too large packet: %s", err)
 			}

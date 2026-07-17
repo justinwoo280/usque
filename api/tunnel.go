@@ -467,6 +467,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					}
 				}
 				dnsRewriter.RewriteQuery(buf[:n])
+				internal.ClampMSSPacket(buf[:n], cfg.MTU)
 				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
 					if pumpCtx.Err() != nil {
@@ -524,6 +525,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					continue
 				}
 				dnsRewriter.RewriteResponse(buf[:n])
+				internal.ClampMSSPacket(buf[:n], cfg.MTU)
 				if err := cfg.Device.WritePacket(buf[:n]); err != nil {
 					if pumpCtx.Err() != nil {
 						return
