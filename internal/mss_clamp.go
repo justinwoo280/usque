@@ -136,11 +136,14 @@ func findMSSOption(opts []byte) (offset int, value uint16, found bool) {
 
 // onesComplementSub performs RFC 1624 incremental checksum update.
 //
-//	hc' = hc + ~old + new  (in 1's complement arithmetic)
+//	HC' = HC + ~old + new  (in 1's complement arithmetic)
 //
-// The complement is 0xFFFF - old for 16-bit values, not a uint32 negation.
+// where ~old = 0xFFFF - old for 16-bit values.
+// See RFC 1624: HC' = ~(~HC + ~m + m') = HC + ~m' + m.
+// Here oldWord = m (the value being removed), newWord = m' (the value being added).
 func onesComplementSub(hc, oldWord, newWord uint32) uint32 {
-	hc = hc + (0xFFFF - oldWord) + newWord
+	// HC' = HC + ~newWord + oldWord  (RFC 1624 equation 3)
+	hc = hc + (0xFFFF - newWord) + oldWord
 	for hc>>16 != 0 {
 		hc = (hc & 0xffff) + (hc >> 16)
 	}
