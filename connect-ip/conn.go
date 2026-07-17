@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -75,6 +76,13 @@ type Conn struct {
 	mu                sync.Mutex
 	peerAddresses     []netip.Prefix // IP prefixes that we assigned to the peer
 	localRoutes       []IPRoute      // IP routes that we advertised to the peer
+
+	// maxPayload tracks the largest QUIC datagram payload the connection can
+	// currently accept. Updated from DatagramTooLargeError. When non-zero,
+	// packets whose encapsulated size exceeds this value are proactively
+	// rejected with an ICMP Packet Too Big instead of being sent through
+	// QUIC (which may silently drop them when the PMTUD estimate is stale).
+	maxPayload atomic.Int64
 	assignedAddresses []netip.Prefix
 	availableRoutes   []IPRoute
 
@@ -389,9 +397,31 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 		log.Printf("dropping proxied packet (%d bytes) that can't be proxied: %s", len(b), err)
 		return nil, nil
 	}
+
+	// Proactive check: if we already know the max datagram payload from a
+	// previous DatagramTooLargeError, reject oversized packets immediately
+	// instead of sending them through QUIC (where they may be silently
+	// dropped if the PMTUD estimate is stale).
+	if mp := c.maxPayload.Load(); mp > 0 && int64(len(data)) > mp {
+		effectiveMTU := int(mp) - datagramOverhead
+		if effectiveMTU < minMTU {
+			effectiveMTU = minMTU
+		}
+		log.Printf("packet too large for known max payload (%d > %d), sending ICMP Packet Too Big with MTU=%d",
+			len(data), mp, effectiveMTU)
+		icmpPacket, err := composeICMPTooLargePacket(b, effectiveMTU)
+		if err != nil {
+			log.Printf("failed to compose ICMP too large packet: %s", err)
+		}
+		return icmpPacket, nil
+	}
+
 	if err := c.str.SendDatagram(data); err != nil {
 		var errDTL *quic.DatagramTooLargeError
 		if errors.As(err, &errDTL) {
+			// Cache the max payload so future packets are rejected proactively.
+			c.maxPayload.Store(errDTL.MaxDatagramPayloadSize)
+
 			// Use the actual QUIC max datagram payload size to compute the
 			// effective IP-layer MTU. This lets the OS cache an accurate
 			// path MTU instead of falling back to a hardcoded minimum.
