@@ -369,26 +369,6 @@ func udpOffset(pkt []byte) int {
 	return -1
 }
 
-func isUDP(pkt []byte) bool {
-	return udpOffset(pkt) >= 0
-}
-
-func udpSrcPort(pkt []byte) uint16 {
-	off := udpOffset(pkt)
-	if off < 0 {
-		return 0
-	}
-	return binary.BigEndian.Uint16(pkt[off:])
-}
-
-func udpDstPort(pkt []byte) uint16 {
-	off := udpOffset(pkt)
-	if off < 0 {
-		return 0
-	}
-	return binary.BigEndian.Uint16(pkt[off+2:])
-}
-
 // --- Full checksum computation (test verification only) ---
 
 func ipChecksum(hdr []byte) uint16 {

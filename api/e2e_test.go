@@ -374,6 +374,11 @@ func (m *mockDevice) WritePacket(pkt []byte) error {
 	return nil
 }
 
+func (m *mockDevice) Close() error {
+	close(m.readCh)
+	return nil
+}
+
 // Ensure json import is used (for potential debug output)
 var _ = json.Marshal
 
