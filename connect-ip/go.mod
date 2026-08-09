@@ -8,3 +8,10 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	golang.org/x/net v0.43.0
 )
+
+require (
+	github.com/quic-go/qpack v0.6.0 // indirect
+	golang.org/x/crypto v0.41.0 // indirect
+	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/text v0.28.0 // indirect
+)

@@ -185,7 +185,10 @@ func NewFdAdapter(fd int) TunnelDevice {
 // pumps to exit after an error before spawning a fresh pair. A device-side
 // pump may still be parked in a blocking TUN read during this window; the
 // readMu serializes any overlap with the next cycle's device reader.
-const pumpShutdownGrace = 2 * time.Second
+const (
+	pumpShutdownGrace   = 2 * time.Second
+	pmtuRefreshInterval = time.Second
+)
 
 // MaintainTunnelConfig contains runtime settings for tunnel maintenance.
 type MaintainTunnelConfig struct {
@@ -278,6 +281,13 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+func effectiveTunnelMTU(configuredMTU, pathMTU int) int {
+	if pathMTU > 0 && (configuredMTU <= 0 || pathMTU < configuredMTU) {
+		return pathMTU
+	}
+	return configuredMTU
 }
 
 // MaintainTunnel continuously connects to the MASQUE server, then starts two
@@ -380,6 +390,12 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			continue
 		}
 
+		if mtu, _, refreshErr := ipConn.RefreshPMTU(); refreshErr != nil {
+			log.Printf("Unable to determine initial tunnel PMTU: %v", refreshErr)
+		} else if mtu > 0 {
+			log.Printf("Initial effective tunnel PMTU: %d", effectiveTunnelMTU(cfg.MTU, mtu))
+		}
+
 		emitState("connected")
 		log.Println("Connected to MASQUE server")
 
@@ -418,7 +434,32 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			}
 		}()
 
-		wg.Add(2)
+		wg.Add(3)
+
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(pmtuRefreshInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pumpCtx.Done():
+					return
+				case <-ticker.C:
+					previous := ipConn.EffectiveMTU()
+					mtu, changed, refreshErr := ipConn.RefreshPMTU()
+					if refreshErr != nil {
+						if pumpCtx.Err() == nil {
+							log.Printf("Unable to refresh tunnel PMTU: %v", refreshErr)
+						}
+						continue
+					}
+					if changed {
+						log.Printf("Effective tunnel PMTU changed: %d -> %d",
+							effectiveTunnelMTU(cfg.MTU, previous), effectiveTunnelMTU(cfg.MTU, mtu))
+					}
+				}
+			}
+		}()
 
 		go func() {
 			defer wg.Done()
@@ -467,7 +508,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					}
 				}
 				dnsRewriter.RewriteQuery(buf[:n])
-				internal.ClampMSSPacket(buf[:n], cfg.MTU)
+				internal.ClampMSSPacket(buf[:n], effectiveTunnelMTU(cfg.MTU, ipConn.EffectiveMTU()))
 				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
 					if pumpCtx.Err() != nil {
@@ -525,7 +566,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					continue
 				}
 				dnsRewriter.RewriteResponse(buf[:n])
-				internal.ClampMSSPacket(buf[:n], cfg.MTU)
+				internal.ClampMSSPacket(buf[:n], effectiveTunnelMTU(cfg.MTU, ipConn.EffectiveMTU()))
 				if err := cfg.Device.WritePacket(buf[:n]); err != nil {
 					if pumpCtx.Err() != nil {
 						return

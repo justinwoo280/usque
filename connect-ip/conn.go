@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -51,16 +52,9 @@ var (
 	_ http3Stream = &http3.RequestStream{}
 )
 
-// If a packet is too large to fit into a QUIC datagram,
-// we send an ICMP Packet Too Big packet.
-// On IPv6, the minimum MTU of a link is 1280 bytes.
-const minMTU = 1280
+const datagramSizeProbe = 2048
 
-// The encapsulation overhead between the raw IP packet and the QUIC datagram
-// payload. The QUIC datagram carries: quarter_stream_id (varint, 1 byte for
-// stream 0) + context_id (varint, 1 byte for context 0) = 2 bytes. We use this
-// to convert MaxDatagramPayloadSize into an effective IP-layer MTU.
-const datagramOverhead = 2
+var datagramProbePayload = make([]byte, datagramSizeProbe)
 
 // Conn is a connection that proxies IP packets over HTTP/3.
 type Conn struct {
@@ -78,12 +72,25 @@ type Conn struct {
 	assignedAddresses []netip.Prefix
 	availableRoutes   []IPRoute
 
+	usesQUICDatagrams    bool
+	httpDatagramOverhead int
+	maxDatagramPayload   atomic.Int64
+
 	closeChan chan struct{}
 	closeErr  error
 }
 
 func newProxiedConn(str http3Stream) *Conn {
-	return newConn(str, true)
+	c := newConn(str, true)
+	c.usesQUICDatagrams = true
+	// HTTP/3 prepends the quarter stream ID before passing the payload to
+	// QUIC. Request streams expose their stream ID, so account for its exact
+	// varint length instead of assuming this is always the first stream.
+	c.httpDatagramOverhead = quicvarint.Len(0)
+	if s, ok := str.(interface{ StreamID() quic.StreamID }); ok {
+		c.httpDatagramOverhead = quicvarint.Len(uint64(s.StreamID() / 4))
+	}
+	return c
 }
 
 func newDatagramOnlyConn(str http3Stream) *Conn {
@@ -384,6 +391,11 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte, allowAny bool) error {
 // If sending the packet fails, it might return an ICMP packet.
 // It is the caller's responsibility to send the ICMP packet to the sender.
 func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
+	if maxPayload := c.maxDatagramPayload.Load(); maxPayload > 0 &&
+		int64(len(b)+len(contextIDZero)+c.httpDatagramOverhead) > maxPayload {
+		return c.composeTooLargePacket(b, maxPayload)
+	}
+
 	data, err := c.composeDatagram(b)
 	if err != nil {
 		log.Printf("dropping proxied packet (%d bytes) that can't be proxied: %s", len(b), err)
@@ -393,20 +405,7 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	if err := c.str.SendDatagram(data); err != nil {
 		var errDTL *quic.DatagramTooLargeError
 		if errors.As(err, &errDTL) {
-			// Use the actual QUIC max datagram payload size to compute the
-			// effective IP-layer MTU. This lets the OS cache an accurate
-			// path MTU instead of falling back to a hardcoded minimum.
-			effectiveMTU := int(errDTL.MaxDatagramPayloadSize) - datagramOverhead
-			if effectiveMTU < minMTU {
-				effectiveMTU = minMTU
-			}
-			log.Printf("packet too large for QUIC datagram (max payload %d), sending ICMP Packet Too Big with MTU=%d",
-				errDTL.MaxDatagramPayloadSize, effectiveMTU)
-			icmpPacket, err := composeICMPTooLargePacket(b, effectiveMTU)
-			if err != nil {
-				log.Printf("failed to compose ICMP too large packet: %s", err)
-			}
-			return icmpPacket, nil
+			return c.composeTooLargePacket(b, errDTL.MaxDatagramPayloadSize)
 		}
 		select {
 		case <-c.closeChan:
@@ -416,6 +415,53 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 		}
 	}
 	return nil, nil
+}
+
+// EffectiveMTU returns the largest IP packet currently accepted by the QUIC
+// DATAGRAM send path. It returns 0 for HTTP/2 or before a limit is known.
+func (c *Conn) EffectiveMTU() int {
+	maxPayload := c.maxDatagramPayload.Load()
+	if maxPayload <= 0 {
+		return 0
+	}
+	return int(maxPayload) - c.httpDatagramOverhead - len(contextIDZero)
+}
+
+// RefreshPMTU asks the QUIC send path for its current datagram payload limit.
+// The probe is intentionally larger than quic-go's maximum packet buffer, so
+// it is rejected synchronously and never placed on the wire.
+func (c *Conn) RefreshPMTU() (mtu int, changed bool, err error) {
+	if !c.usesQUICDatagrams {
+		return 0, false, nil
+	}
+	err = c.str.SendDatagram(datagramProbePayload)
+	var errDTL *quic.DatagramTooLargeError
+	if !errors.As(err, &errDTL) {
+		if err == nil {
+			return 0, false, errors.New("connect-ip: PMTU probe unexpectedly fit in a QUIC datagram")
+		}
+		return 0, false, fmt.Errorf("connect-ip: PMTU probe failed: %w", err)
+	}
+	if errDTL.MaxDatagramPayloadSize <= int64(c.httpDatagramOverhead+len(contextIDZero)) {
+		return 0, false, fmt.Errorf("connect-ip: invalid QUIC datagram payload limit: %d", errDTL.MaxDatagramPayloadSize)
+	}
+	previous := c.maxDatagramPayload.Swap(errDTL.MaxDatagramPayloadSize)
+	return c.EffectiveMTU(), previous != errDTL.MaxDatagramPayloadSize, nil
+}
+
+func (c *Conn) composeTooLargePacket(b []byte, maxPayload int64) ([]byte, error) {
+	if maxPayload <= int64(c.httpDatagramOverhead+len(contextIDZero)) {
+		return nil, fmt.Errorf("connect-ip: invalid QUIC datagram payload limit: %d", maxPayload)
+	}
+	c.maxDatagramPayload.Store(maxPayload)
+	effectiveMTU := c.EffectiveMTU()
+	log.Printf("packet too large for QUIC datagram (max payload %d), sending ICMP Packet Too Big with MTU=%d",
+		maxPayload, effectiveMTU)
+	icmpPacket, err := composeICMPTooLargePacket(b, effectiveMTU)
+	if err != nil {
+		return nil, fmt.Errorf("connect-ip: failed to compose ICMP too large packet: %w", err)
+	}
+	return icmpPacket, nil
 }
 
 func (c *Conn) composeDatagram(b []byte) ([]byte, error) {

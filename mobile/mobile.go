@@ -194,8 +194,12 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	var dnsHijack4, dnsHijack6 net.IP
 	// Default to both stacks enabled; ParseTunSettings applies config defaults
 	// (ipv4/ipv6 both true) for the legacy/empty case.
+	tunMTU := 1280
 	blockV4, blockV6 := false, false
 	if settings, err := fc.ParseTunSettings(); err == nil {
+		if settings.MTU > 0 {
+			tunMTU = settings.MTU
+		}
 		blockV4 = !settings.IPv4
 		blockV6 = !settings.IPv6
 		for _, d := range settings.DNS {
@@ -219,7 +223,7 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 			InitialPacketSize: ob.InitialPacketSize,
 			Endpoint:          endpoint,
 			Device:            tunDev,
-			MTU:               1280,
+			MTU:               tunMTU,
 			ReconnectDelay:    reconnect,
 			AlwaysReconnect:   true,
 			UseHTTP2:          ob.UseHTTP2,
