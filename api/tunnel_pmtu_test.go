@@ -11,6 +11,7 @@ func TestEffectiveTunnelMTU(t *testing.T) {
 	}{
 		{name: "unknown path uses configured MTU", configured: 1420, path: 0, want: 1420},
 		{name: "lower path limits configured MTU", configured: 1420, path: 1241, want: 1241},
+		{name: "QUIC overhead limits WireGuard MTU", configured: 1420, path: 1410, want: 1410},
 		{name: "higher path does not exceed configured MTU", configured: 1420, path: 1450, want: 1420},
 		{name: "path MTU is usable without configured MTU", configured: 0, path: 1280, want: 1280},
 	}
