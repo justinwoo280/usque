@@ -195,7 +195,9 @@ func testHandshake(tlsConfig *tls.Config, endpoint *net.UDPAddr, timeout time.Du
 	}
 
 	t0 := time.Now()
-	conn, err := quic.Dial(ctx, udpConn, endpoint, tlsConfig, quicCfg)
+	quicTransport := api.NewCloudflareQUICTransport(udpConn)
+	defer func() { _ = quicTransport.Close() }()
+	conn, err := quicTransport.Dial(ctx, endpoint, tlsConfig, quicCfg)
 	quicElapsed := time.Since(t0)
 	if err != nil {
 		return false, time.Since(start), fmt.Sprintf("QUIC dial failed (%s): %v", quicElapsed, err)

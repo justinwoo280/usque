@@ -20,6 +20,41 @@ import (
 	"golang.org/x/net/http2"
 )
 
+const cloudflareConnectionIDLength = 20
+
+// TunnelTransport owns the HTTP/3 and QUIC transports used by a MASQUE
+// connection. Both layers must be closed when a tunnel ends: http3.Transport
+// closes the connection, while quic.Transport stops its UDP read loop.
+type TunnelTransport struct {
+	http3Transport *http3.Transport
+	quicTransport  *quic.Transport
+}
+
+func (t *TunnelTransport) Close() error {
+	if t == nil {
+		return nil
+	}
+	var firstErr error
+	if t.http3Transport != nil {
+		firstErr = t.http3Transport.Close()
+	}
+	if t.quicTransport != nil {
+		if err := t.quicTransport.Close(); firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// NewCloudflareQUICTransport creates a QUIC transport with the connection ID
+// length expected by Cloudflare's MASQUE backend.
+func NewCloudflareQUICTransport(conn net.PacketConn) *quic.Transport {
+	return &quic.Transport{
+		Conn:               conn,
+		ConnectionIDLength: cloudflareConnectionIDLength,
+	}
+}
+
 // PrepareTlsConfig creates a TLS configuration using the provided certificate and SNI (Server Name Indication).
 // It also verifies the peer's public key against the provided public key.
 //
@@ -105,11 +140,11 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
 //
 // Returns:
 //   - *net.UDPConn: The UDP connection used for the QUIC session (nil in HTTP/2 mode).
-//   - *http3.Transport: The HTTP/3 transport (nil in HTTP/2 mode).
+//   - *TunnelTransport: The HTTP/3 and QUIC transport owner (nil in HTTP/2 mode).
 //   - *connectip.Conn: The Connect-IP connection instance.
 //   - *http.Response: The response from the Connect-IP handshake.
 //   - error: An error if the connection setup fails.
-func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool, onQUICConnect func(*quic.Conn), preNoise internal.NoiseConfig, updater *InterfaceUpdater, existingUDPConn *net.UDPConn) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool, onQUICConnect func(*quic.Conn), preNoise internal.NoiseConfig, updater *InterfaceUpdater, existingUDPConn *net.UDPConn) (*net.UDPConn, *TunnelTransport, *connectip.Conn, *http.Response, error) {
 	template := uritemplate.MustNew(connectUri)
 	additionalHeaders := http.Header{
 		"User-Agent": []string{""},
@@ -168,14 +203,10 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		internal.InjectUDPPreNoise(udpConn, quicEndpoint, preNoise)
 	}
 
-	conn, err := quic.Dial(
-		ctx,
-		udpConn,
-		quicEndpoint,
-		tlsConfig,
-		quicConfig,
-	)
+	quicTransport := NewCloudflareQUICTransport(udpConn)
+	conn, err := quicTransport.Dial(ctx, quicEndpoint, tlsConfig, quicConfig)
 	if err != nil {
+		_ = quicTransport.Close()
 		return udpConn, nil, nil, nil, err
 	}
 
@@ -183,7 +214,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		onQUICConnect(conn)
 	}
 
-	tr := &http3.Transport{
+	http3Transport := &http3.Transport{
 		EnableDatagrams: true,
 		AdditionalSettings: map[uint64]uint64{
 			// official client still sends this out as well, even though
@@ -194,19 +225,23 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		},
 		DisableCompression: true,
 	}
+	tunnelTransport := &TunnelTransport{
+		http3Transport: http3Transport,
+		quicTransport:  quicTransport,
+	}
 
-	hconn := tr.NewClientConn(conn)
+	hconn := http3Transport.NewClientConn(conn)
 	ipConn, rsp, err := connectip.Dial(ctx, hconn, template, "cf-connect-ip", additionalHeaders, true)
 	if err != nil {
-		_ = tr.Close()
 		_ = conn.CloseWithError(0, "connect-ip dial failed")
+		_ = tunnelTransport.Close()
 		if strings.Contains(err.Error(), "tls: access denied") {
 			return udpConn, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
 		}
 		return udpConn, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %w", err)
 	}
 
-	return udpConn, tr, ipConn, rsp, nil
+	return udpConn, tunnelTransport, ipConn, rsp, nil
 }
 
 // newHTTP2Client builds an HTTP client for CONNECT-IP over HTTP/2.
