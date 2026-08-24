@@ -85,16 +85,27 @@ func testIPv6Packet(size int) []byte {
 	return b
 }
 
-func TestRefreshPMTUTracksChanges(t *testing.T) {
+func TestRefreshPMTURequiresStableIncreaseAndLowersImmediately(t *testing.T) {
 	stream := &pmtuTestStream{maxPayload: 1243}
 	c := newProxiedConn(stream)
 
+	if got := c.EffectiveMTU(); got != 1158 {
+		t.Fatalf("initial effective MTU = %d, want 1158", got)
+	}
 	mtu, changed, err := c.RefreshPMTU()
 	if err != nil {
 		t.Fatal(err)
 	}
+	if changed || mtu != 1158 {
+		t.Fatalf("first refresh = (%d, %t), want (1158, false)", mtu, changed)
+	}
+
+	mtu, changed, err = c.RefreshPMTU()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !changed || mtu != 1201 {
-		t.Fatalf("first refresh = (%d, %t), want (1201, true)", mtu, changed)
+		t.Fatalf("confirmed initial refresh = (%d, %t), want (1201, true)", mtu, changed)
 	}
 
 	stream.setMaxPayload(1452)
@@ -102,8 +113,16 @@ func TestRefreshPMTUTracksChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if changed || mtu != 1201 {
+		t.Fatalf("first increased refresh = (%d, %t), want (1201, false)", mtu, changed)
+	}
+
+	mtu, changed, err = c.RefreshPMTU()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !changed || mtu != 1410 {
-		t.Fatalf("second refresh = (%d, %t), want (1410, true)", mtu, changed)
+		t.Fatalf("confirmed increased refresh = (%d, %t), want (1410, true)", mtu, changed)
 	}
 
 	mtu, changed, err = c.RefreshPMTU()
@@ -124,10 +143,64 @@ func TestRefreshPMTUTracksChanges(t *testing.T) {
 	}
 }
 
+func TestRefreshPMTUDoesNotAdoptTransientIncrease(t *testing.T) {
+	stream := &pmtuTestStream{maxPayload: 1243}
+	c := newProxiedConn(stream)
+	if _, _, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	}
+
+	stream.setMaxPayload(1452)
+	if _, changed, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	} else if changed {
+		t.Fatal("transient PMTU increase was adopted")
+	}
+
+	stream.setMaxPayload(1243)
+	if mtu, changed, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	} else if changed || mtu != 1201 {
+		t.Fatalf("PMTU after transient increase = (%d, %t), want (1201, false)", mtu, changed)
+	}
+}
+
+func TestRefreshPMTUConcurrentObservations(t *testing.T) {
+	stream := &pmtuTestStream{maxPayload: 1452}
+	c := newProxiedConn(stream)
+
+	const workers = 8
+	const refreshesPerWorker = 20
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range refreshesPerWorker {
+				if _, _, err := c.RefreshPMTU(); err != nil {
+					t.Errorf("RefreshPMTU() failed: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := c.EffectiveMTU(); got != 1410 {
+		t.Fatalf("concurrent effective MTU = %d, want 1410", got)
+	}
+}
+
 func TestRefreshPMTUUsesExactHTTP3StreamOverhead(t *testing.T) {
 	stream := &pmtuTestStream{streamID: 256, maxPayload: 1452}
 	c := newProxiedConn(stream)
 
+	if _, _, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	}
 	mtu, _, err := c.RefreshPMTU()
 	if err != nil {
 		t.Fatal(err)
@@ -144,6 +217,9 @@ func TestWritePacketPreflightsKnownPMTU(t *testing.T) {
 	if _, _, err := c.RefreshPMTU(); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	}
 	callsBeforeWrite := stream.calls()
 
 	icmpPacket, err := c.WritePacket(testIPv4Packet(1299))
@@ -155,6 +231,46 @@ func TestWritePacketPreflightsKnownPMTU(t *testing.T) {
 	}
 	if len(icmpPacket) < 28 {
 		t.Fatalf("ICMP packet too short: %d", len(icmpPacket))
+	}
+	if got := int(binary.BigEndian.Uint32(icmpPacket[24:28])); got != 1258 {
+		t.Fatalf("advertised IPv4 MTU = %d, want 1258", got)
+	}
+}
+
+func TestWritePacketLowersPMTUFromDatagramTooLargeError(t *testing.T) {
+	stream := &pmtuTestStream{maxPayload: 1452}
+	c := newProxiedConn(stream)
+	if _, _, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	}
+
+	stream.setMaxPayload(1300)
+	icmpPacket, err := c.WritePacket(testIPv4Packet(1400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(icmpPacket) < 28 {
+		t.Fatalf("ICMP packet too short: %d", len(icmpPacket))
+	}
+	if got := int(binary.BigEndian.Uint32(icmpPacket[24:28])); got != 1258 {
+		t.Fatalf("advertised IPv4 MTU = %d, want 1258", got)
+	}
+	if got := c.EffectiveMTU(); got != 1258 {
+		t.Fatalf("cached effective MTU = %d, want 1258", got)
+	}
+}
+
+func TestTooLargePacketUsesCurrentLowerPMTU(t *testing.T) {
+	stream := &pmtuTestStream{maxPayload: 1452}
+	c := newProxiedConn(stream)
+	c.maxDatagramPayload.Store(1300)
+
+	icmpPacket, err := c.composeTooLargePacket(testIPv4Packet(1400), 1452)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if got := int(binary.BigEndian.Uint32(icmpPacket[24:28])); got != 1258 {
 		t.Fatalf("advertised IPv4 MTU = %d, want 1258", got)
@@ -185,9 +301,12 @@ func TestWritePacketAdvertisesIPv6MTUBelow1280(t *testing.T) {
 	}
 }
 
-func TestWritePacketProtectsWireGuardMTUFromQUICOverhead(t *testing.T) {
+func TestWritePacketTracksEffectiveHTTP3MTU(t *testing.T) {
 	stream := &pmtuTestStream{maxPayload: 1243}
 	c := newProxiedConn(stream)
+	if _, _, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := c.RefreshPMTU(); err != nil {
 		t.Fatal(err)
 	}
@@ -201,26 +320,22 @@ func TestWritePacketProtectsWireGuardMTUFromQUICOverhead(t *testing.T) {
 	stream.setMaxPayload(1452)
 	if mtu, _, err := c.RefreshPMTU(); err != nil {
 		t.Fatal(err)
+	} else if mtu != 1201 {
+		t.Fatalf("effective MTU = %d, want 1201 before confirmation", mtu)
+	}
+	if mtu, _, err := c.RefreshPMTU(); err != nil {
+		t.Fatal(err)
 	} else if mtu != 1410 {
-		t.Fatalf("effective MTU = %d, want 1410", mtu)
+		t.Fatalf("effective MTU = %d, want 1410 after confirmation", mtu)
 	}
 	callsBeforeWrite := stream.calls()
-
-	if icmpPacket, err := c.WritePacket(testIPv4Packet(1420)); err != nil {
-		t.Fatal(err)
-	} else if len(icmpPacket) == 0 {
-		t.Fatal("1420-byte packet should generate ICMP at effective MTU 1410")
-	}
-	if stream.calls() != callsBeforeWrite {
-		t.Fatal("1420-byte packet reached the QUIC datagram stream")
-	}
 
 	if icmpPacket, err := c.WritePacket(testIPv4Packet(1410)); err != nil {
 		t.Fatal(err)
 	} else if len(icmpPacket) != 0 {
-		t.Fatal("1410-byte packet unexpectedly generated ICMP")
+		t.Fatal("1410-byte packet unexpectedly generated ICMP at effective MTU 1410")
 	}
 	if stream.calls() != callsBeforeWrite+1 {
-		t.Fatal("1410-byte packet was not passed to the QUIC datagram stream")
+		t.Fatal("1420-byte packet was not passed to the QUIC datagram stream")
 	}
 }

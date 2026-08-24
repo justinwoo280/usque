@@ -54,11 +54,18 @@ var (
 
 const (
 	datagramSizeProbe = 2048
-	// quic-go's PMTU estimate switches from an initial payload estimate to
-	// the discovered outer QUIC packet size. Reserve its documented worst-case
-	// short-header, AEAD tag, and DATAGRAM frame overhead before treating that
-	// value as an application payload limit.
+	// quic-go reports its initial estimate as a datagram payload, but reports
+	// acknowledged PMTU probes as the outer QUIC packet size. Keep the larger
+	// outer-packet overhead separate from the HTTP/3 and CONNECT-IP framing.
 	quicDatagramOverhead = 40
+	// QUIC's minimum InitialPacketSize is 1200. This is the conservative raw
+	// payload bound used until a PMTU observation has been confirmed.
+	conservativeInitialDatagramPayload = 1200
+	// A higher limit is only adopted after two refreshes. quic-go already
+	// validates increases with acknowledged PMTU probes, but keeping this small
+	// hysteresis here prevents an out-of-order observation from expanding the
+	// IP-side limit for a single refresh interval.
+	pmtuIncreaseConfirmations = 2
 )
 
 var datagramProbePayload = make([]byte, datagramSizeProbe)
@@ -82,6 +89,9 @@ type Conn struct {
 	usesQUICDatagrams    bool
 	httpDatagramOverhead int
 	maxDatagramPayload   atomic.Int64
+	pmtuMu               sync.Mutex
+	pmtuIncrease         int64
+	pmtuIncreaseCount    int
 
 	closeChan chan struct{}
 	closeErr  error
@@ -97,6 +107,7 @@ func newProxiedConn(str http3Stream) *Conn {
 	if s, ok := str.(interface{ StreamID() quic.StreamID }); ok {
 		c.httpDatagramOverhead = quicvarint.Len(uint64(s.StreamID() / 4))
 	}
+	c.maxDatagramPayload.Store(conservativeInitialDatagramPayload)
 	return c
 }
 
@@ -398,7 +409,7 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte, allowAny bool) error {
 // If sending the packet fails, it might return an ICMP packet.
 // It is the caller's responsibility to send the ICMP packet to the sender.
 func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
-	if maxPayload := c.maxDatagramPayload.Load(); maxPayload > 0 && len(b) > c.EffectiveMTU() {
+	if maxPayload := c.maxDatagramPayload.Load(); maxPayload > 0 && len(b) > c.effectiveMTUForPayload(maxPayload) {
 		return c.composeTooLargePacket(b, maxPayload)
 	}
 
@@ -423,8 +434,9 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	return nil, nil
 }
 
-// EffectiveMTU returns the largest IP packet currently accepted by the QUIC
-// DATAGRAM send path. It returns 0 for HTTP/2 or before a limit is known.
+// EffectiveMTU returns the largest conservatively accepted IP packet size for
+// the QUIC DATAGRAM send path. HTTP/2 returns 0; QUIC starts from a conservative
+// baseline before a path-specific limit is observed.
 func (c *Conn) EffectiveMTU() int {
 	maxPayload := c.maxDatagramPayload.Load()
 	if maxPayload <= 0 {
@@ -451,16 +463,21 @@ func (c *Conn) RefreshPMTU() (mtu int, changed bool, err error) {
 	if errDTL.MaxDatagramPayloadSize <= int64(c.datagramOverhead()) {
 		return 0, false, fmt.Errorf("connect-ip: invalid QUIC datagram payload limit: %d", errDTL.MaxDatagramPayloadSize)
 	}
-	previous := c.maxDatagramPayload.Swap(errDTL.MaxDatagramPayloadSize)
-	return c.EffectiveMTU(), previous != errDTL.MaxDatagramPayloadSize, nil
+	changed = c.observePMTU(errDTL.MaxDatagramPayloadSize)
+	return c.EffectiveMTU(), changed, nil
 }
 
 func (c *Conn) composeTooLargePacket(b []byte, maxPayload int64) ([]byte, error) {
 	if maxPayload <= int64(c.datagramOverhead()) {
 		return nil, fmt.Errorf("connect-ip: invalid QUIC datagram payload limit: %d", maxPayload)
 	}
-	c.maxDatagramPayload.Store(maxPayload)
-	effectiveMTU := c.EffectiveMTU()
+	// Another writer may have observed a smaller limit after this packet was
+	// preflighted. Never advertise a larger MTU than the current lower bound.
+	if current := c.maxDatagramPayload.Load(); current > 0 && current < maxPayload {
+		maxPayload = current
+	}
+	c.observePMTU(maxPayload)
+	effectiveMTU := c.effectiveMTUForPayload(maxPayload)
 	log.Printf("packet too large for QUIC datagram (max payload %d), sending ICMP Packet Too Big with MTU=%d",
 		maxPayload, effectiveMTU)
 	icmpPacket, err := composeICMPTooLargePacket(b, effectiveMTU)
@@ -472,6 +489,44 @@ func (c *Conn) composeTooLargePacket(b []byte, maxPayload int64) ([]byte, error)
 
 func (c *Conn) datagramOverhead() int {
 	return quicDatagramOverhead + c.httpDatagramOverhead + len(contextIDZero)
+}
+
+func (c *Conn) observePMTU(maxPayload int64) bool {
+	c.pmtuMu.Lock()
+	defer c.pmtuMu.Unlock()
+
+	current := c.maxDatagramPayload.Load()
+	switch {
+	case current <= 0:
+		c.maxDatagramPayload.Store(maxPayload)
+		c.pmtuIncrease = 0
+		c.pmtuIncreaseCount = 0
+		return true
+	case maxPayload <= current:
+		if maxPayload < current {
+			c.maxDatagramPayload.Store(maxPayload)
+		}
+		c.pmtuIncrease = 0
+		c.pmtuIncreaseCount = 0
+		return maxPayload < current
+	case c.pmtuIncrease == maxPayload:
+		c.pmtuIncreaseCount++
+	default:
+		c.pmtuIncrease = maxPayload
+		c.pmtuIncreaseCount = 1
+	}
+
+	if c.pmtuIncreaseCount < pmtuIncreaseConfirmations {
+		return false
+	}
+	c.maxDatagramPayload.Store(maxPayload)
+	c.pmtuIncrease = 0
+	c.pmtuIncreaseCount = 0
+	return true
+}
+
+func (c *Conn) effectiveMTUForPayload(maxPayload int64) int {
+	return int(maxPayload) - c.datagramOverhead()
 }
 
 func (c *Conn) composeDatagram(b []byte) ([]byte, error) {
