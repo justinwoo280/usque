@@ -1,9 +1,12 @@
-FROM golang:1.25.5-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
+
+ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 
 COPY go.mod .
 COPY go.sum .
+COPY connect-ip/go.mod connect-ip/go.sum ./connect-ip/
 
 RUN go mod download
 

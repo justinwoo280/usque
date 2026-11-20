@@ -58,7 +58,7 @@ Extract the archive and you will find a binary named `usque` in the root directo
 
 Since the tool is written in Go, it should be rather trivial.
 
-1. Ensure that you have Go installed on your system. You can download it from [here](https://golang.org/dl/). At least Go 1.25.5 is required.
+1. Install Go 1.26.10 from [go.dev](https://go.dev/dl/). CI, release builds and Docker use this version.
 2. Clone this repository and switch to the project's root directory
 3. Build the project using the following command:
 ```shell

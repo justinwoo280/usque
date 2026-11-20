@@ -1,6 +1,6 @@
 module github.com/Diniboy1123/connect-ip-go
 
-go 1.24
+go 1.26.10
 
 require (
 	github.com/apernet/quic-go v0.59.1-0.20260425001925-6c6cc9bcb716

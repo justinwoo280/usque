@@ -1,6 +1,6 @@
 module github.com/Diniboy1123/usque
 
-go 1.25.5
+go 1.26.10
 
 require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20260409225322-8d7bb0a858a2
