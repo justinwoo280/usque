@@ -103,6 +103,7 @@ func buildOutbound(fc *config.FullConfig) (*outboundBundle, error) {
 			TLSConfig:         tlsConfig,
 			KeepalivePeriod:   keepalivePeriod,
 			InitialPacketSize: ob.InitialPacketSize,
+			PMTU:              api.PMTUConfig{IPv4: acct.IPv4, IPv6: acct.IPv6, Target: ob.PMTUTarget},
 			Endpoint:          endpoint,
 			ReconnectDelay:    reconnectDelay,
 			AlwaysReconnect:   ob.AlwaysReconnect,

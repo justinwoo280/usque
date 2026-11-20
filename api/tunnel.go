@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	connectip "github.com/Diniboy1123/connect-ip-go"
@@ -195,6 +196,7 @@ type MaintainTunnelConfig struct {
 	TLSConfig         *tls.Config
 	KeepalivePeriod   time.Duration
 	InitialPacketSize uint16
+	PMTU              PMTUConfig
 	Endpoint          net.Addr
 	Device            TunnelDevice
 	MTU               int
@@ -309,7 +311,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 	}
 
-	packetBufferPool := NewNetBuffer(cfg.MTU)
+	// A local jumbo TUN and reassembled inbound IP packets must not be
+	// truncated to the current (much smaller) tunnel MTU.
+	packetBufferPool := NewNetBuffer(65535)
 	dnsRewriter := internal.NewDNSRewriter(cfg.DNSHijackTarget4, cfg.DNSHijackTarget6)
 
 	emitState := func(state string) {
@@ -318,17 +322,21 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 	}
 
-	var totalSent, totalRecv int64
+	var totalSent, totalRecv atomic.Int64
+	var readMu sync.Mutex
+	var pendingPacket []byte
 
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
-		if !cfg.AlwaysReconnect {
+		if !cfg.AlwaysReconnect && pendingPacket == nil {
 			log.Println("Tunnel idle. Waiting for outbound activity before reconnecting...")
 			buf := packetBufferPool.Get()
-			n, err := cfg.Device.ReadPacket(buf)
+			readMu.Lock()
+			n, err := readDevicePacket(ctx, cfg.Device, buf)
+			readMu.Unlock()
 			if err != nil {
 				packetBufferPool.Put(buf)
 				log.Printf("Failed to read from TUN device while waiting for activity: %v", err)
@@ -337,6 +345,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				}
 				continue
 			}
+			pendingPacket = append([]byte(nil), buf[:n]...)
 			packetBufferPool.Put(buf)
 			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", n)
 		}
@@ -391,9 +400,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 
 		if mtu, _, refreshErr := ipConn.RefreshPMTU(); refreshErr != nil {
-			log.Printf("Unable to determine initial tunnel PMTU: %v", refreshErr)
+			log.Printf("Unable to determine initial QUIC send limit: %v", refreshErr)
 		} else if mtu > 0 {
-			log.Printf("Initial effective tunnel PMTU: %d", effectiveTunnelMTU(cfg.MTU, mtu))
+			log.Printf("Initial inner MTU estimate (unverified): %d", effectiveTunnelMTU(cfg.MTU, mtu))
 		}
 
 		emitState("connected")
@@ -409,7 +418,6 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		errChan := make(chan error, 2)
 		pumpCtx, cancelPumps := context.WithCancel(ctx)
 		var wg sync.WaitGroup
-		var readMu sync.Mutex
 
 		// ctxShutdown watches the parent context. When it is cancelled (e.g. via
 		// StopTunnel), we tear down the pumps and the IP connection so the
@@ -434,33 +442,17 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			}
 		}()
 
-		wg.Add(3)
+		wg.Add(2)
+		if !cfg.UseHTTP2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				monitorPathMTU(pumpCtx, ipConn, cfg)
+			}()
+		}
 
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(pmtuRefreshInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-pumpCtx.Done():
-					return
-				case <-ticker.C:
-					previous := ipConn.EffectiveMTU()
-					mtu, changed, refreshErr := ipConn.RefreshPMTU()
-					if refreshErr != nil {
-						if pumpCtx.Err() == nil {
-							log.Printf("Unable to refresh tunnel PMTU: %v", refreshErr)
-						}
-						continue
-					}
-					if changed {
-						log.Printf("Effective tunnel PMTU changed: %d -> %d",
-							effectiveTunnelMTU(cfg.MTU, previous), effectiveTunnelMTU(cfg.MTU, mtu))
-					}
-				}
-			}
-		}()
-
+		firstPacket := pendingPacket
+		pendingPacket = nil
 		go func() {
 			defer wg.Done()
 			buf := packetBufferPool.Get()
@@ -473,7 +465,15 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					return
 				}
 				readMu.Lock()
-				n, err := cfg.Device.ReadPacket(buf)
+				updateDeviceMTU(cfg, ipConn.EffectiveMTU())
+				var n int
+				var err error
+				if firstPacket != nil {
+					n = copy(buf, firstPacket)
+					firstPacket = nil
+				} else {
+					n, err = readDevicePacket(pumpCtx, cfg.Device, buf)
+				}
 				readMu.Unlock()
 				if err != nil {
 					// During teardown (pumpCtx cancelled, e.g. ctx cancelled by
@@ -521,9 +521,11 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					log.Printf("Error writing to IP connection: %v, continuing...", err)
 					continue
 				}
-				totalSent += int64(n)
-				if cfg.OnTraffic != nil {
-					cfg.OnTraffic(totalSent, totalRecv)
+				if len(icmp) == 0 {
+					totalSent.Add(int64(n))
+					if cfg.OnTraffic != nil {
+						cfg.OnTraffic(totalSent.Load(), totalRecv.Load())
+					}
 				}
 
 				if len(icmp) > 0 {
@@ -574,9 +576,9 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					errChan <- fmt.Errorf("failed to write to TUN device: %w", err)
 					return
 				}
-				totalRecv += int64(n)
+				totalRecv.Add(int64(n))
 				if cfg.OnTraffic != nil {
-					cfg.OnTraffic(totalSent, totalRecv)
+					cfg.OnTraffic(totalSent.Load(), totalRecv.Load())
 				}
 			}
 		}()
@@ -621,4 +623,13 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			return
 		}
 	}
+}
+
+func readDevicePacket(ctx context.Context, dev TunnelDevice, buf []byte) (int, error) {
+	if d, ok := dev.(interface {
+		ReadPacketContext(context.Context, []byte) (int, error)
+	}); ok {
+		return d.ReadPacketContext(ctx, buf)
+	}
+	return dev.ReadPacket(buf)
 }

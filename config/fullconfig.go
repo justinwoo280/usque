@@ -100,6 +100,7 @@ type OutboundSettings struct {
 	SNIAddress        string           `json:"sni_address"`
 	KeepalivePeriod   string           `json:"keepalive_period"`
 	InitialPacketSize uint16           `json:"initial_packet_size"`
+	PMTUTarget        string           `json:"pmtu_target,omitempty"` // inner echo responder IP, empty for auto, "off" to disable
 	ReconnectDelay    string           `json:"reconnect_delay"`
 	AlwaysReconnect   bool             `json:"always_reconnect"`
 	Insecure          bool             `json:"insecure"`
