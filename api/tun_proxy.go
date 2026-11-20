@@ -28,7 +28,7 @@ func MaintainTUN(ctx context.Context, cfg MaintainTunnelConfig) {
 		_ = cfg.Device.Close()
 		return
 	}
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	log.Printf("gVisor TUN proxy: local MTU %d, independent tunnel MTU discovery", cfg.MTU)
 	cfg.Device = p
 	cfg.MTU = 1500

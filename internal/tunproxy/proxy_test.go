@@ -91,7 +91,7 @@ func TestProxyJumboTCPAndUDP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer p.Close()
+			defer func() { _ = p.Close() }()
 			p.SetMTU(1400)
 			var cap atomic.Int64
 			cap.Store(1400)
@@ -138,20 +138,20 @@ func TestProxyJumboTCPAndUDP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer ln.Close()
+			defer func() { _ = ln.Close() }()
 			go func() {
 				c, err := ln.Accept()
 				if err != nil {
 					return
 				}
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				_, _ = io.Copy(c, c)
 			}()
 			c, err := gonet.DialContextTCP(ctx, client.s, a, proto)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			_ = c.SetDeadline(time.Now().Add(15 * time.Second))
 			for phase := 0; phase < 2; phase++ {
 				if phase == 1 {
@@ -187,7 +187,7 @@ func TestProxyJumboTCPAndUDP(t *testing.T) {
 				t.Fatal(err)
 			}
 			u := gonet.NewUDPConn(&uq, uep)
-			defer u.Close()
+			defer func() { _ = u.Close() }()
 			go func() {
 				buf := make([]byte, MaxPacketSize)
 				n, from, err := u.ReadFrom(buf)
@@ -199,7 +199,7 @@ func TestProxyJumboTCPAndUDP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer uc.Close()
+			defer func() { _ = uc.Close() }()
 			_ = uc.SetDeadline(time.Now().Add(3 * time.Second))
 			payload := bytes.Repeat([]byte("datagram"), 130)
 			if _, err := uc.Write(payload); err != nil {

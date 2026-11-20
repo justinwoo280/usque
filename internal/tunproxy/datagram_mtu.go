@@ -28,12 +28,13 @@ func (p *Proxy) rejectOversizedDatagram(b []byte) bool {
 				return false
 			}
 			n := (int(b[off+1]) + 1) * 8
-			if proto == 44 {
+			switch proto {
+			case 44:
 				if binary.BigEndian.Uint16(b[off+2:off+4])&0xfff8 != 0 {
 					return false
 				}
 				n = 8
-			} else if proto == 51 {
+			case 51:
 				n = (int(b[off+1]) + 2) * 4
 			}
 			proto, off = b[off], off+n

@@ -139,7 +139,7 @@ func (p *Proxy) tcp(r *tcp.ForwarderRequest) {
 		r.Complete(true)
 		return
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 	var wq waiter.Queue
 	ep, e := r.CreateEndpoint(&wq)
 	r.Complete(e != nil)
@@ -147,22 +147,25 @@ func (p *Proxy) tcp(r *tcp.ForwarderRequest) {
 		return
 	}
 	in := gonet.NewTCPConn(&wq, ep)
-	defer in.Close()
-	stop := context.AfterFunc(p.ctx, func() { in.Close(); out.Close() })
+	defer func() { _ = in.Close() }()
+	stop := context.AfterFunc(p.ctx, func() {
+		_ = in.Close()
+		_ = out.Close()
+	})
 	defer stop()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		if _, err := io.Copy(out, in); err != nil {
-			in.Close()
-			out.Close()
+			_ = in.Close()
+			_ = out.Close()
 			return
 		}
 		_ = out.CloseWrite()
 	}()
 	if _, err := io.Copy(in, out); err != nil {
-		in.Close()
-		out.Close()
+		_ = in.Close()
+		_ = out.Close()
 	} else {
 		_ = in.CloseWrite()
 	}
@@ -185,7 +188,7 @@ func (p *Proxy) udp(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool 
 	in := gonet.NewUDPConn(&wq, ep)
 	go func() {
 		defer p.leave()
-		defer in.Close()
+		defer func() { _ = in.Close() }()
 		a, proto := address(p.destination(id), id.LocalPort)
 		var outWQ waiter.Queue
 		outEP, err := p.remote.s.NewEndpoint(udp.ProtocolNumber, proto, &outWQ)
@@ -198,14 +201,22 @@ func (p *Proxy) udp(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool 
 			return
 		}
 		out := gonet.NewUDPConn(&outWQ, outEP)
-		defer out.Close()
-		stop := context.AfterFunc(p.ctx, func() { in.Close(); out.Close() })
+		defer func() { _ = out.Close() }()
+		stop := context.AfterFunc(p.ctx, func() {
+			_ = in.Close()
+			_ = out.Close()
+		})
 		defer stop()
 		done := make(chan struct{})
-		go func() { defer close(done); relayDatagrams(out, in); in.Close(); out.Close() }()
+		go func() {
+			defer close(done)
+			relayDatagrams(out, in)
+			_ = in.Close()
+			_ = out.Close()
+		}()
 		relayDatagrams(in, out)
-		in.Close()
-		out.Close()
+		_ = in.Close()
+		_ = out.Close()
 		<-done
 	}()
 	return true

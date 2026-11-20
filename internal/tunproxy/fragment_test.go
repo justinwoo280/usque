@@ -36,7 +36,7 @@ func TestSourceFragmentsSurviveSecondMTUShrink(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 			var wq waiter.Queue
 			ep, e := a.s.NewEndpoint(udp.ProtocolNumber, proto, &wq)
 			if e != nil {
@@ -47,7 +47,7 @@ func TestSourceFragmentsSurviveSecondMTUShrink(t *testing.T) {
 				t.Fatal(e)
 			}
 			out := gonet.NewUDPConn(&wq, ep)
-			defer out.Close()
+			defer func() { _ = out.Close() }()
 			payload := bytes.Repeat([]byte("unique UDP message"), 300)
 			if _, err := out.Write(payload); err != nil {
 				t.Fatal(err)

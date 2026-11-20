@@ -58,7 +58,7 @@ var pmtuCmd = &cobra.Command{
 			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize), internal.ConnectURI,
 			cfg.Endpoint, false, cfg.OnQUICConnect, cfg.PreNoise, nil, nil)
 		if udp != nil {
-			defer udp.Close()
+			defer func() { _ = udp.Close() }()
 		}
 		if err != nil {
 			return err
@@ -92,8 +92,8 @@ var pmtuCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "WARP endpoint %s; echo target %s; verified inner MTU: %d bytes (search ceiling %d)\n", cfg.Endpoint, dst, mtu, ceiling)
-		return nil
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "WARP endpoint %s; echo target %s; verified inner MTU: %d bytes (search ceiling %d)\n", cfg.Endpoint, dst, mtu, ceiling)
+		return err
 	},
 }
 
