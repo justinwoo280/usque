@@ -161,7 +161,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		// TODO: support PQC
 		h2Headers.Set("pq-enabled", "false")
 
-		h2Client, err := newHTTP2Client(tlsConfig, h2Endpoint, connectUri)
+		h2Client, err := newHTTP2Client(tlsConfig, h2Endpoint, connectUri, updater)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("failed to create HTTP/2 client: %w", err)
 		}
@@ -184,14 +184,12 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	var udpConn *net.UDPConn
 	ownsUDPConn := existingUDPConn == nil
 	if ownsUDPConn {
-		var listenAddr *net.UDPAddr
+		network, listenAddr := "udp4", &net.UDPAddr{IP: net.IPv4zero}
 		if quicEndpoint.IP.To4() == nil {
-			listenAddr = &net.UDPAddr{IP: net.IPv6zero, Port: 0}
-		} else {
-			listenAddr = &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+			network, listenAddr = "udp6", &net.UDPAddr{IP: net.IPv6zero}
 		}
 		var err error
-		udpConn, err = listenUDPWithBind(ctx, "udp", listenAddr, updater)
+		udpConn, err = listenUDPWithBind(ctx, network, listenAddr, updater)
 		if err != nil {
 			return udpConn, nil, nil, nil, err
 		}
@@ -246,7 +244,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 
 // newHTTP2Client builds an HTTP client for CONNECT-IP over HTTP/2.
 // It honors proxy environment variables and pins dialing to the selected endpoint.
-func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI string) (*http.Client, error) {
+func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI string, updater *InterfaceUpdater) (*http.Client, error) {
 	if endpoint == nil {
 		return nil, errors.New("missing HTTP/2 endpoint")
 	}
@@ -264,7 +262,7 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
 	if proxyURL == nil {
 		transport := &http2.Transport{
 			DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
-				dialer := &net.Dialer{}
+				dialer := &net.Dialer{Control: updater.socketControl}
 				conn, err := dialer.DialContext(ctx, network, endpoint.String())
 				if err != nil {
 					return nil, err

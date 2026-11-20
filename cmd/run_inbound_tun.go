@@ -130,14 +130,18 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 			log.Println("Warning: auto-route is not supported on this platform")
 		}
 
-		tunIfIndex, err := getTunIfIndex(t.name)
-		if err != nil {
-			log.Printf("Warning: failed to get TUN interface index: %v", err)
+		if selector, ok := routeMgr.(interface{ OutboundInterfaceIndex() (int, error) }); ok {
+			updater = api.NewEndpointInterfaceUpdater(selector.OutboundInterfaceIndex)
 		} else {
-			updater = api.NewInterfaceUpdater("auto", tunIfIndex)
-			updater.Update()
-			if routeMgr != nil {
-				routeMgr.SetInterfaceChangeCallback(updater.Update)
+			tunIfIndex, err := getTunIfIndex(t.name)
+			if err != nil {
+				log.Printf("Warning: failed to get TUN interface index: %v", err)
+			} else {
+				updater = api.NewInterfaceUpdater("auto", tunIfIndex)
+				updater.Update()
+				if routeMgr != nil {
+					routeMgr.SetInterfaceChangeCallback(updater.Update)
+				}
 			}
 		}
 	}

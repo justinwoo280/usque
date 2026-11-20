@@ -3,12 +3,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/netip"
-	"os/exec"
-	"strings"
+	"sync"
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
@@ -26,9 +26,36 @@ func flushResolverCache() error {
 }
 
 type windowsRouteManager struct {
-	cfg            AutoRouteConfig
-	luid           winipcfg.LUID
-	changeCallback *winipcfg.InterfaceChangeCallback
+	cfg      AutoRouteConfig
+	luid     winipcfg.LUID
+	defaults []windowsRoute
+
+	mu     sync.Mutex // serializes endpoint selection with Cleanup
+	bypass *windowsRoute
+	closed bool
+}
+
+type windowsRoute struct {
+	luid        winipcfg.LUID
+	destination netip.Prefix
+	nextHop     netip.Addr
+}
+
+func (r windowsRoute) matches(luid winipcfg.LUID, destination netip.Prefix, nextHop netip.Addr) bool {
+	// Windows can report a link-local gateway with or without a scope ID.
+	// The interface LUID already distinguishes the scope for this route.
+	return r.luid == luid && r.destination == destination && r.nextHop.WithZone("") == nextHop.WithZone("")
+}
+
+func (r windowsRoute) remove() error {
+	err := r.luid.DeleteRoute(r.destination, r.nextHop)
+	if errors.Is(err, windows.ERROR_NOT_FOUND) {
+		return nil // Windows may have already removed the route on link loss.
+	}
+	if err != nil {
+		return fmt.Errorf("delete route %s via %s: %w", r.destination, r.nextHop, err)
+	}
+	return nil
 }
 
 func newRouteManager(cfg AutoRouteConfig) RouteManager {
@@ -44,24 +71,20 @@ func (m *windowsRouteManager) Setup() error {
 		if err != nil {
 			return fmt.Errorf("find interface %s: %w", m.cfg.InterfaceName, err)
 		}
-		m.luid = winipcfg.LUID(iface.Index)
-	}
-
-	gw, gwIface, err := findDefaultGateway()
-	if err != nil {
-		log.Printf("Warning: failed to find default gateway: %v (endpoint bypass may not work)", err)
-	}
-
-	if m.cfg.EndpointIP != nil && gw != "" {
-		if err := addEndpointBypass(m.cfg.EndpointIP, gw, gwIface); err != nil {
-			log.Printf("Warning: endpoint bypass failed: %v", err)
-		} else {
-			log.Printf("Endpoint bypass: %s via %s", m.cfg.EndpointIP, gw)
+		m.luid, err = winipcfg.LUIDFromIndex(uint32(iface.Index))
+		if err != nil {
+			return fmt.Errorf("get LUID for %s: %w", m.cfg.InterfaceName, err)
 		}
 	}
 
+	// Resolve and install the endpoint host route before capturing either
+	// default route. Failing here is safer than dialing back into Wintun.
+	if _, err := m.OutboundInterfaceIndex(); err != nil {
+		return err
+	}
+
 	if err := m.setupRoutes(); err != nil {
-		return fmt.Errorf("setup routes: %w", err)
+		return errors.Join(fmt.Errorf("setup routes: %w", err), m.Cleanup())
 	}
 
 	if err := m.setupDNS(); err != nil {
@@ -94,126 +117,133 @@ func (m *windowsRouteManager) Cleanup() error {
 	// immediately, even if later route/DNS cleanup steps fail.
 	disableDNSFirewall()
 
-	if m.changeCallback != nil {
-		if err := m.changeCallback.Unregister(); err != nil {
-			log.Printf("Warning: failed to unregister interface change callback: %v", err)
-		}
-		m.changeCallback = nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed = true
+	var errs []error
+	for _, route := range m.defaults {
+		errs = append(errs, route.remove())
 	}
-
-	if m.cfg.EndpointIP != nil {
-		mask := "255.255.255.255"
-		if m.cfg.EndpointIP.To4() == nil {
-			mask = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
-		}
-		_ = exec.Command("route", "delete", m.cfg.EndpointIP.String(), "mask", mask).Run()
+	m.defaults = nil
+	if m.bypass != nil {
+		errs = append(errs, m.bypass.remove())
+		m.bypass = nil
 	}
-
-	// Both families' routes are always installed now (disabled stacks are
-	// black-holed via the TUN), so flush both on cleanup.
-	_ = m.luid.FlushRoutes(windows.AF_INET)
-	_ = m.luid.FlushRoutes(windows.AF_INET6)
 
 	if err := flushResolverCache(); err != nil {
 		log.Printf("Warning: failed to flush DNS cache: %v", err)
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
-func (m *windowsRouteManager) SetInterfaceChangeCallback(cb func()) {
-	if m.changeCallback != nil {
-		_ = m.changeCallback.Unregister()
-		m.changeCallback = nil
+// Windows reselects egress on every dial instead of caching an interface name.
+func (*windowsRouteManager) SetInterfaceChangeCallback(func()) {}
+
+func (m *windowsRouteManager) OutboundInterfaceIndex() (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return 0, net.ErrClosed
 	}
-	reg, err := winipcfg.RegisterInterfaceChangeCallback(func(_ winipcfg.MibNotificationType, _ *winipcfg.MibIPInterfaceRow) {
-		cb()
-	})
+	addr, ok := netip.AddrFromSlice(m.cfg.EndpointIP)
+	addr = addr.Unmap()
+	if !ok || addr.IsUnspecified() {
+		return 0, errors.New("Windows auto-route requires a WARP endpoint IP")
+	}
+	family := winipcfg.AddressFamily(windows.AF_INET6)
+	if addr.Is4() {
+		family = windows.AF_INET
+	}
+	routes, err := winipcfg.GetIPForwardTable2(family)
 	if err != nil {
-		log.Printf("Warning: failed to register interface change callback: %v", err)
-		return
+		return 0, fmt.Errorf("get Windows routes for %s: %w", addr, err)
 	}
-	m.changeCallback = reg
-	log.Println("Interface change callback registered")
-}
-
-func findDefaultGateway() (string, string, error) {
-	routes, err := winipcfg.GetIPForwardTable2(windows.AF_INET)
+	ifaces, err := winipcfg.GetIPInterfaceTable(family)
 	if err != nil {
-		return "", "", fmt.Errorf("get routes: %w", err)
+		return 0, fmt.Errorf("get Windows IP interfaces for %s: %w", addr, err)
 	}
-
-	for _, route := range routes {
-		if route.DestinationPrefix.Prefix().Bits() == 0 &&
-			route.DestinationPrefix.Prefix().Addr().Is4() {
-			nextHop := route.NextHop.Addr().String()
-			ifIdx := route.InterfaceIndex
-
-			ifaces, err := net.Interfaces()
-			if err != nil {
-				return nextHop, "", nil
+	row := bestWindowsEndpointRoute(addr, m.luid, m.bypass, routes, ifaces)
+	if row == nil {
+		return 0, fmt.Errorf("no Windows egress route to WARP endpoint %s outside Wintun", addr)
+	}
+	next := windowsRoute{row.InterfaceLUID, netip.PrefixFrom(addr, addr.BitLen()), row.NextHop.Addr()}
+	var owned *windowsRoute
+	sameBypass := m.bypass != nil && m.bypass.matches(next.luid, next.destination, next.nextHop)
+	if row.DestinationPrefix.Prefix() != next.destination {
+		if sameBypass && windowsRouteExists(next, routes) {
+			owned = m.bypass
+		} else if err := next.luid.AddRoute(next.destination, next.nextHop, row.Metric); err == nil {
+			owned = &next
+			log.Printf("Windows endpoint route: %s via %s (interface %d)", next.destination, next.nextHop, row.InterfaceIndex)
+		} else if errors.Is(err, windows.ERROR_OBJECT_ALREADY_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			if sameBypass {
+				owned = m.bypass
 			}
-			for _, iface := range ifaces {
-				if iface.Index == int(ifIdx) {
-					return nextHop, iface.Name, nil
-				}
-			}
-			return nextHop, "", nil
+		} else {
+			return 0, fmt.Errorf("add Windows endpoint route %s: %w", next.destination, err)
 		}
 	}
-
-	return "", "", fmt.Errorf("no default route found")
-}
-
-func addEndpointBypass(endpointIP net.IP, gateway, gwIface string) error {
-	mask := "255.255.255.255"
-	if endpointIP.To4() == nil {
-		mask = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
-	}
-
-	args := []string{"add", endpointIP.String(), "mask", mask, gateway, "metric", "1"}
-	if gwIface != "" {
-		iface, err := net.InterfaceByName(gwIface)
-		if err == nil {
-			args = append(args, "if", fmt.Sprintf("%d", iface.Index))
+	if m.bypass != nil && !sameBypass {
+		if err := m.bypass.remove(); err != nil {
+			// Keep tracking the old route if the switch couldn't complete.
+			// Only roll back a newly created route, not a user's host route.
+			if owned != nil {
+				return 0, errors.Join(err, owned.remove())
+			}
+			return 0, err
 		}
 	}
+	m.bypass = owned
+	return int(row.InterfaceIndex), nil
+}
 
-	out, err := exec.Command("route", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("route add: %s: %w", strings.TrimSpace(string(out)), err)
+func windowsRouteExists(want windowsRoute, rows []winipcfg.MibIPforwardRow2) bool {
+	for _, r := range rows {
+		if want.matches(r.InterfaceLUID, r.DestinationPrefix.Prefix(), r.NextHop.Addr()) {
+			return true
+		}
 	}
-	return nil
+	return false
+}
+
+// Longest prefix wins, followed by route + interface metric. Ignore our own
+// /32 or /128 so it doesn't pin reconnects to an old Wi-Fi/Ethernet route.
+func bestWindowsEndpointRoute(target netip.Addr, tun winipcfg.LUID, bypass *windowsRoute, routes []winipcfg.MibIPforwardRow2, ifaces []winipcfg.MibIPInterfaceRow) *winipcfg.MibIPforwardRow2 {
+	metrics := make(map[winipcfg.LUID]uint32, len(ifaces))
+	for _, iface := range ifaces {
+		if iface.Connected {
+			metrics[iface.InterfaceLUID] = iface.Metric
+		}
+	}
+	var best *winipcfg.MibIPforwardRow2
+	bestBits := -1
+	var bestMetric uint64
+	for i := range routes {
+		r := &routes[i]
+		prefix, hop := r.DestinationPrefix.Prefix(), r.NextHop.Addr()
+		metric, connected := metrics[r.InterfaceLUID]
+		if !connected || r.InterfaceLUID == tun || r.InterfaceIndex == 0 || r.Loopback ||
+			!prefix.Contains(target) || !hop.IsValid() || hop.BitLen() != target.BitLen() ||
+			(bypass != nil && bypass.matches(r.InterfaceLUID, prefix, hop)) {
+			continue
+		}
+		combined := uint64(metric) + uint64(r.Metric)
+		if prefix.Bits() > bestBits || prefix.Bits() == bestBits && combined < bestMetric {
+			best, bestBits, bestMetric = r, prefix.Bits(), combined
+		}
+	}
+	return best
 }
 
 func (m *windowsRouteManager) setupRoutes() error {
-	var routes []winipcfg.RouteData
-
-	// Point BOTH default routes at the TUN regardless of which stacks are
-	// enabled. A disabled stack's packets are then pulled into the TUN and
-	// black-holed by the engine at the tunnel ingress, instead of falling back
-	// to the physical NIC's default route (the previous leak). This unifies the
-	// disable-stack behaviour with Android/Linux.
-	routes = append(routes, winipcfg.RouteData{
-		Destination: netip.MustParsePrefix("0.0.0.0/0"),
-		NextHop:     netip.IPv4Unspecified(),
-		Metric:      0,
-	})
-	routes = append(routes, winipcfg.RouteData{
-		Destination: netip.MustParsePrefix("::/0"),
-		NextHop:     netip.IPv6Unspecified(),
-		Metric:      0,
-	})
-
-	if len(routes) > 0 {
-		routePtrs := make([]*winipcfg.RouteData, len(routes))
-		for i := range routes {
-			routePtrs[i] = &routes[i]
+	// Send both families to Wintun, including families dropped by the TUN engine.
+	for _, ip := range []netip.Addr{netip.IPv4Unspecified(), netip.IPv6Unspecified()} {
+		prefix := netip.PrefixFrom(ip, 0)
+		if err := m.luid.AddRoute(prefix, ip, 0); err != nil {
+			return fmt.Errorf("add Wintun default route %s: %w", prefix, err)
 		}
-		if err := m.luid.SetRoutes(routePtrs); err != nil {
-			return fmt.Errorf("set default routes: %w", err)
-		}
+		m.defaults = append(m.defaults, windowsRoute{m.luid, prefix, ip})
 	}
-
 	return nil
 }
 
@@ -224,10 +254,13 @@ func (m *windowsRouteManager) setupDNS() error {
 
 	var dns4, dns6 []netip.Addr
 	for _, dns := range m.cfg.DNSServers {
-		if dns.To4() != nil {
-			dns4 = append(dns4, netip.MustParseAddr(dns.String()))
-		} else {
-			dns6 = append(dns6, netip.MustParseAddr(dns.String()))
+		if addr, ok := netip.AddrFromSlice(dns); ok {
+			addr = addr.Unmap()
+			if addr.Is4() {
+				dns4 = append(dns4, addr)
+			} else {
+				dns6 = append(dns6, addr)
+			}
 		}
 	}
 

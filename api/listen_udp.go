@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net"
-	"syscall"
 )
 
 // listenUDPWithBind creates a UDP socket optionally bound to a physical interface.
@@ -14,22 +13,7 @@ func listenUDPWithBind(ctx context.Context, network string, addr *net.UDPAddr, u
 		return net.ListenUDP(network, addr)
 	}
 
-	lc := net.ListenConfig{
-		Control: func(_, _ string, c syscall.RawConn) error {
-			iface := updater.Get()
-			if iface == nil {
-				return nil
-			}
-			var opErr error
-			err := c.Control(func(fd uintptr) {
-				opErr = BindToDevice(fd, iface)
-			})
-			if err != nil {
-				return err
-			}
-			return opErr
-		},
-	}
+	lc := net.ListenConfig{Control: updater.socketControl}
 	conn, err := lc.ListenPacket(ctx, network, addr.String())
 	if err != nil {
 		return nil, err

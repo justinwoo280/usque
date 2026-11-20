@@ -1,11 +1,13 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // InterfaceUpdater detects the physical network interface and provides it
@@ -14,10 +16,11 @@ import (
 // directly to the physical NIC via SO_BINDTODEVICE (Linux), IP_BOUND_IF
 // (macOS), or IP_UNICAST_IF (Windows).
 type InterfaceUpdater struct {
-	mu        sync.Mutex
-	tunIndex  int
-	fixedName string
-	iface     *net.Interface
+	mu           sync.Mutex
+	tunIndex     int
+	fixedName    string
+	iface        *net.Interface
+	resolveIndex func() (int, error)
 }
 
 // NewInterfaceUpdater creates an updater. If name is "auto" or "", the best
@@ -29,6 +32,38 @@ func NewInterfaceUpdater(name string, tunIndex int) *InterfaceUpdater {
 		u.fixedName = name
 	}
 	return u
+}
+
+// NewEndpointInterfaceUpdater selects an interface for the configured
+// endpoint before each socket is opened. The selector can also refresh a host
+// route, and returning an error prevents dialing through the TUN by accident.
+func NewEndpointInterfaceUpdater(resolveIndex func() (int, error)) *InterfaceUpdater {
+	return &InterfaceUpdater{resolveIndex: resolveIndex}
+}
+
+func (u *InterfaceUpdater) socketControl(_, _ string, c syscall.RawConn) error {
+	if u == nil {
+		return nil
+	}
+	iface := u.Get()
+	if u.resolveIndex != nil {
+		index, err := u.resolveIndex()
+		if err != nil {
+			return err
+		}
+		if index <= 0 {
+			return fmt.Errorf("invalid outbound interface index %d", index)
+		}
+		iface = &net.Interface{Index: index}
+	}
+	if iface == nil {
+		return nil
+	}
+	var bindErr error
+	if err := c.Control(func(fd uintptr) { bindErr = BindToDevice(fd, iface) }); err != nil {
+		return err
+	}
+	return bindErr
 }
 
 // Get returns the currently selected physical interface (thread-safe).

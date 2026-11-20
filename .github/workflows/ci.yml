@@ -102,6 +102,17 @@ jobs:
           name: coverage
           path: coverage.out
 
+  windows-test:
+    name: Windows socket and TUN tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test Windows bindings and gVisor
+        run: go test -count=1 -timeout 2m ./api ./cmd ./internal/tunproxy
+
   mobile:
     name: Mobile library (${{ matrix.target }})
     runs-on: ubuntu-latest
