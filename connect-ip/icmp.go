@@ -10,6 +10,13 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
+// PacketTooBig returns an ICMP error quoting the original IP packet. It is also
+// used by a terminating TUN proxy to report its datagram budget to the local
+// sender, whose addresses/ports differ from those on the outbound socket.
+func PacketTooBig(b []byte, mtu int) ([]byte, error) {
+	return composeICMPTooLargePacket(b, mtu)
+}
+
 func composeICMPTooLargePacket(b []byte, mtu int) ([]byte, error) {
 	if len(b) == 0 {
 		return nil, errors.New("connect-ip: empty packet")
@@ -22,12 +29,16 @@ func composeICMPTooLargePacket(b []byte, mtu int) ([]byte, error) {
 		if len(b) < ipv4.HeaderLen {
 			return nil, errors.New("connect-ip: IPv4 packet too short")
 		}
+		hlen := int(b[0]&15) * 4
+		if hlen < ipv4.HeaderLen || hlen > len(b) {
+			return nil, errors.New("connect-ip: invalid IPv4 header length")
+		}
 		icmpMessage = &icmp.Message{
 			Type: ipv4.ICMPTypeDestinationUnreachable,
 			Code: 4, // Fragmentation Needed and Don't Fragment was Set
 			Body: &icmp.PacketTooBig{
 				MTU:  mtu,
-				Data: b[:min(len(b), ipv4.HeaderLen+8)],
+				Data: b[:min(len(b), hlen+8)],
 			},
 		}
 	case 6:

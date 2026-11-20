@@ -183,7 +183,7 @@ func LoadFullConfig(path string) (*FullConfig, error) {
 			Account: old,
 			Inbound: InboundConfig{
 				Type:     "tun",
-				Settings: mustMarshal(TunInboundSettings{MTU: 1280, IPv4: true, IPv6: true}),
+				Settings: mustMarshal(TunInboundSettings{MTU: 9000, IPv4: true, IPv6: true}),
 			},
 			Outbound: OutboundConfig{
 				Tag: "warp",
@@ -223,7 +223,10 @@ func (fc *FullConfig) ParseTunSettings() (TunInboundSettings, error) {
 		return s, fmt.Errorf("parse tun settings: %w", err)
 	}
 	if s.MTU == 0 {
-		s.MTU = 1280
+		s.MTU = 9000
+	}
+	if s.MTU < 1280 || s.MTU > 65535 {
+		return s, fmt.Errorf("TUN MTU must be between 1280 and 65535")
 	}
 	if len(s.DNS) == 0 {
 		s.DNS = []string{"1.1.1.1", "2606:4700:4700::1111"}
@@ -378,7 +381,7 @@ func NewDefaultFullConfig(acct AccountConfig) *FullConfig {
 		Inbound: InboundConfig{
 			Type: "tun",
 			Settings: mustMarshal(TunInboundSettings{
-				MTU:       1280,
+				MTU:       9000,
 				IPv4:      true,
 				IPv6:      true,
 				AutoRoute: true,

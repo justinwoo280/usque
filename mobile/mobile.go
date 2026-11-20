@@ -104,6 +104,10 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	if err != nil {
 		return "failed to parse config: " + err.Error()
 	}
+	tunSettings, err := fc.ParseTunSettings()
+	if err != nil {
+		return "failed to parse TUN settings: " + err.Error()
+	}
 
 	acct := &fc.Account
 	privKey, err := acct.GetEcPrivateKey()
@@ -194,33 +198,27 @@ func StartTunnel(tunFd int, udpFd int, configJSON string) string {
 	var dnsHijack4, dnsHijack6 net.IP
 	// Default to both stacks enabled; ParseTunSettings applies config defaults
 	// (ipv4/ipv6 both true) for the legacy/empty case.
-	tunMTU := 1280
-	blockV4, blockV6 := false, false
-	if settings, err := fc.ParseTunSettings(); err == nil {
-		if settings.MTU > 0 {
-			tunMTU = settings.MTU
+	tunMTU := tunSettings.MTU
+	blockV4, blockV6 := !tunSettings.IPv4, !tunSettings.IPv6
+	for _, d := range tunSettings.DNS {
+		ip := net.ParseIP(d)
+		if ip == nil {
+			continue
 		}
-		blockV4 = !settings.IPv4
-		blockV6 = !settings.IPv6
-		for _, d := range settings.DNS {
-			ip := net.ParseIP(d)
-			if ip == nil {
-				continue
-			}
-			if ip.To4() != nil && dnsHijack4 == nil {
-				dnsHijack4 = ip
-			} else if ip.To4() == nil && dnsHijack6 == nil {
-				dnsHijack6 = ip
-			}
+		if ip.To4() != nil && dnsHijack4 == nil {
+			dnsHijack4 = ip
+		} else if ip.To4() == nil && dnsHijack6 == nil {
+			dnsHijack6 = ip
 		}
 	}
 
 	go func() {
 		defer close(mgr.done)
-		api.MaintainTunnel(ctx, api.MaintainTunnelConfig{
+		api.MaintainTUN(ctx, api.MaintainTunnelConfig{
 			TLSConfig:         tlsConfig,
 			KeepalivePeriod:   keepalive,
 			InitialPacketSize: ob.InitialPacketSize,
+			PMTU:              api.PMTUConfig{IPv4: acct.IPv4, IPv6: acct.IPv6, Target: ob.PMTUTarget},
 			Endpoint:          endpoint,
 			Device:            tunDev,
 			MTU:               tunMTU,

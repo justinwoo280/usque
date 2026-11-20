@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -72,10 +73,6 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 		return err
 	}
 
-	if settings.MTU != 1280 {
-		log.Println("Warning: MTU is not the default 1280. Packet loss and other issues may occur.")
-	}
-
 	t := &tunDevice{
 		name:     settings.Name,
 		mtu:      settings.MTU,
@@ -89,9 +86,15 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 
 	dev, err := t.create()
 	if err != nil {
-		log.Println("Are you root/administrator? TUN device creation usually requires elevated privileges.")
-		log.Fatalf("Failed to create TUN device: %v", err)
+		return fmt.Errorf("create TUN (requires elevated privileges): %w", err)
 	}
+	// Until MaintainTUN starts, this function owns the device. In particular,
+	// tear it down if installing the bypass or the default routes fails.
+	defer func() {
+		if dev != nil {
+			_ = dev.Close()
+		}
+	}()
 	log.Printf("Created TUN device: %s", t.name)
 
 	var updater *api.InterfaceUpdater
@@ -114,8 +117,15 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 		routeMgr = newRouteManager(routeCfg)
 		if routeMgr != nil {
 			if err := routeMgr.Setup(); err != nil {
-				log.Fatalf("Auto-route setup failed: %v", err)
+				return fmt.Errorf("set up auto-route: %w", err)
 			}
+			defer func() {
+				if err := routeMgr.Cleanup(); err != nil {
+					log.Printf("Warning: route cleanup failed: %v", err)
+				} else {
+					log.Println("Auto-route cleaned up")
+				}
+			}()
 		} else {
 			log.Println("Warning: auto-route is not supported on this platform")
 		}
@@ -140,12 +150,11 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 	}
 
 	ob.maintainCfg.Device = dev
+	dev = nil // MaintainTUN now owns it.
 	ob.maintainCfg.MTU = settings.MTU
 	ob.maintainCfg.HookEnv = hookEnv
 	ob.maintainCfg.InterfaceUpdater = updater
-	// Black-hole a disabled stack at the TUN ingress (fail-fast, zero leak).
-	// The route managers still point both default routes at the TUN so the
-	// kernel delivers the disabled stack's packets to us to drop.
+	// Drop the disabled families at the TUN ingress.
 	ob.maintainCfg.BlockIPv4 = !settings.IPv4
 	ob.maintainCfg.BlockIPv6 = !settings.IPv6
 
@@ -169,7 +178,8 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 		}
 	}
 
-	go api.MaintainTunnel(ctx, ob.maintainCfg)
+	done := make(chan struct{})
+	go func() { defer close(done); api.MaintainTUN(ctx, ob.maintainCfg) }()
 
 	if settings.AutoRoute {
 		log.Println("Tunnel established with auto-route enabled")
@@ -177,17 +187,16 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 		log.Println("Tunnel established, you may now set up routing and DNS")
 	}
 
-	sig := <-sigCh
-	log.Printf("Received signal %v, shutting down...", sig)
-	cancel()
-
-	if routeMgr != nil {
-		if err := routeMgr.Cleanup(); err != nil {
-			log.Printf("Warning: route cleanup failed: %v", err)
-		} else {
-			log.Println("Auto-route cleaned up")
-		}
+	select {
+	case sig := <-sigCh:
+		log.Printf("Received signal %v, shutting down...", sig)
+	case <-ctx.Done():
+	case <-done:
+		cancel()
+		return fmt.Errorf("TUN engine stopped")
 	}
+	cancel()
+	<-done
 	return nil
 }
 

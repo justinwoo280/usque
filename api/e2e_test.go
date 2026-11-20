@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -20,8 +21,15 @@ import (
 
 func loadE2EConfig(t *testing.T) {
 	t.Helper()
-	fc, err := config.LoadFullConfig("../config.json")
+	path := os.Getenv("USQUE_E2E_CONFIG")
+	if path == "" {
+		path = "../config.json"
+	}
+	fc, err := config.LoadFullConfig(path)
 	if err != nil {
+		if os.Getenv("USQUE_E2E_CONFIG") != "" {
+			t.Fatalf("load E2E config: %v", err)
+		}
 		t.Skipf("config.json not available, skipping E2E: %v", err)
 	}
 	config.AppConfig = fc.Account

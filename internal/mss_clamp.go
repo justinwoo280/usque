@@ -47,6 +47,9 @@ func ClampMSS(packet []byte, maxMSS int) {
 		if ihl < 20 || len(packet) < ihl {
 			return
 		}
+		if binary.BigEndian.Uint16(packet[6:8])&0x1fff != 0 {
+			return // Non-initial fragments don't start with a TCP header.
+		}
 		protocol = packet[9]
 		ipHdrLen = ihl
 	case 6:

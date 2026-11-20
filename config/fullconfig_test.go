@@ -338,8 +338,8 @@ func TestNewDefaultFullConfig(t *testing.T) {
 	if err := json.Unmarshal(fc.Inbound.Settings, &ts); err != nil {
 		t.Fatalf("default tun settings invalid JSON: %v", err)
 	}
-	if ts.MTU != 1280 {
-		t.Errorf("default tun.mtu = %d, want 1280", ts.MTU)
+	if ts.MTU != 9000 {
+		t.Errorf("default tun.mtu = %d, want 9000", ts.MTU)
 	}
 }
 
