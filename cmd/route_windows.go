@@ -236,15 +236,27 @@ func bestWindowsEndpointRoute(target netip.Addr, tun winipcfg.LUID, bypass *wind
 }
 
 func (m *windowsRouteManager) setupRoutes() error {
-	// Send both families to Wintun, including families dropped by the TUN engine.
-	for _, ip := range []netip.Addr{netip.IPv4Unspecified(), netip.IPv6Unspecified()} {
-		prefix := netip.PrefixFrom(ip, 0)
-		if err := m.luid.AddRoute(prefix, ip, 0); err != nil {
-			return fmt.Errorf("add Wintun default route %s: %w", prefix, err)
+	// A disabled family is dropped by WFP, not by route preference. Leave
+	// that family's physical routes intact for the WARP outer transport.
+	for _, ip := range windowsTUNDefaultRoutes(m.cfg.EnableIPv4, m.cfg.EnableIPv6) {
+		if err := m.luid.AddRoute(ip, ip.Addr(), 0); err != nil {
+			return fmt.Errorf("add Wintun default route %s: %w", ip, err)
 		}
-		m.defaults = append(m.defaults, windowsRoute{m.luid, prefix, ip})
+		m.defaults = append(m.defaults, windowsRoute{m.luid, ip, ip.Addr()})
 	}
+
 	return nil
+}
+
+func windowsTUNDefaultRoutes(ipv4, ipv6 bool) []netip.Prefix {
+	var routes []netip.Prefix
+	if ipv4 {
+		routes = append(routes, netip.PrefixFrom(netip.IPv4Unspecified(), 0))
+	}
+	if ipv6 {
+		routes = append(routes, netip.PrefixFrom(netip.IPv6Unspecified(), 0))
+	}
+	return routes
 }
 
 func (m *windowsRouteManager) setupDNS() error {

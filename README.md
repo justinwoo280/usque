@@ -150,7 +150,20 @@ $ ./usque enroll
 
 ### Native Tunnel Mode (for Advanced Users, Linux and Windows only!)
 
-The native tunnel is probably the most **efficient** mode of operation *(as of now)*. 
+Native and Android TUN traffic now uses a **terminating gVisor proxy**. TCP
+connections are independently segmented on the local and WARP sides; UDP
+datagram boundaries are preserved. There is no transparent L3 forwarding mode.
+New configurations default to a local TUN MTU of **9000**. The tunnel packet
+budget is discovered independently, and oversized UDP/ICMP gets local MTU
+feedback. See [TUN architecture and PMTU testing](_docs/PMTU.md).
+
+Measure actual echoed inner IP packets through your WARP session, without
+creating a TUN or changing system routes:
+
+```shell
+./usque pmtu -c config.json --max 1500
+./usque pmtu -c config.json --target 2606:4700:4700::1111 --max 1500
+```
 
 #### On Linux
 
@@ -158,12 +171,18 @@ It **requires the `TUN` device** to be available on the system. This means your 
 
 #### On Windows
 
-It requires the [wintun.dll](https://www.wintun.net/) file to be present in the same directory as the `usque.exe` binary. Then it will take care of bringing up the interface and setting the IP addresses. Normally this also requires administrative privileges.
+Place the official [Wintun DLL](https://www.wintun.net/) for your binary's
+architecture (`amd64` or `arm64`) next to `usque.exe`. With a `tun` inbound,
+run `.\usque.exe run -c config.json` from elevated PowerShell. It creates a
+Wintun adapter named `usque` by default and applies the configured local MTU
+to enabled address families. `.\usque.exe pmtu -c config.json` can measure the
+WARP tunnel separately, without Wintun or administrator privileges.
+See [Windows validation](_docs/PMTU.md#windows-validation).
 
-To bring up a native tunnel, execute:
+On Linux, bring up a native tunnel with:
 
 ```shell
-$ sudo ./usque nativetun
+$ sudo ./usque run -c config.json
 ```
 
 Unless otherwise specified, you should see a `tun0` (or `tun1`, `tun2`, etc.) interface appear on Linux. On Windows, the interface is typically named `usque`. If you didn't disable IPv4 and IPv6 inside the tunnel using cli flags (on Linux), you should also see the IPv4 and IPv6 address pre-assigned to this interface. This should be enough for applications that can route traffic through a specific network interface to function. For example `ping`:
@@ -178,7 +197,9 @@ Or `curl`:
 $ curl --interface tun0 https://cloudflare.com/cdn-cgi/trace
 ```
 
-Should just work. However **the tool doesn't set any routes**. If you need that, you have to do that manually. For example, to route all traffic to the tunnel, you need to make sure that the address used for tunnel communication is routed to your regular network interface. For that, open the `config.json` and check the endpoint address. If you plan to connect to the Cloudflare endpoint using IPv4, you will most likely see this:
+New TUN configs enable `inbound.settings.auto_route`. If you disable it, set
+routes manually and make sure the WARP endpoint stays reachable outside the
+tunnel. For IPv4, check the `endpoint_v4` field in your config:
 
 ```json
 "endpoint_v4": "162.159.198.1"
@@ -201,6 +222,13 @@ $ sudo ip route add default dev tun0 && sudo ip -6 route add default dev tun0
 ```
 
 #### Routes on Windows
+
+With `inbound.settings.auto_route` enabled (the default for newly registered
+configs), usque preserves the configured WARP endpoint using an IPv4 `/32` or
+IPv6 `/128` route before installing Wintun defaults for enabled families.
+Disabling IPv4 or IPv6 in the TUN config also blocks that family's non-loopback
+traffic with Windows Filtering Platform, even with `auto_route` disabled.
+The remaining instructions apply only to manual routing for enabled families.
 
 First, determine the interface index for your regular network adapter by running:
 
@@ -530,7 +558,8 @@ As a starting point, you can reach out to the [`api/`](api/) package. For exampl
 - **no support for WireGuard**: This is a MASQUE client. If you want WireGuard, use the official client or [wgcf](https://github.com/ViRb3/wgcf).
 - **no support for DoH etc.**: Yeah, the official clients expose a lot of extra DNS related features. I wanted to keep this lightweight. Those will probably not be supported by me. If you want, you are free to use 3rd party DoH clients and configure them to use the tunnel interface. DNS over Warp should already be working on all modes except for the native tunnel mode as all DNS queries made inside the tunnel will go through the tunnel (unless you use the `-l` flag).
 - **slow initial speeds**: You may experience slow speeds when opening a new connection that can gradually increase by time. This is due to the `reno` congestion control algorithm used by `quic-go`. It is not the most performant one out there, especially not for high latency environments. We have to wait for support for different congestion control algorithms and see how they compare. For instance there is an open issue for [BBR](https://github.com/quic-go/quic-go/issues/4565).
-- **native tunnels only support Linux**: This is due to the fact that we depend on the `TUN` device. While that exists on Android, without root it's hard to use in its current form. Windows support would be feasible, but I don't have experience with the Windows APIs regarding how to assign IP addresses to network interfaces. BSD and macOS support is uncertain. All these platforms are unsupported for now, because I don't have the means to test them and I am not willing to share untested code. PRs are welcome.
+- **Native TUN is not a general-purpose IP router**: it proxies outgoing TCP,
+  UDP and ICMP echo. Windows uses Wintun; Android uses `VpnService` in UsqueBox.
 
 ## Miscellaneous
 

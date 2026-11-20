@@ -16,79 +16,75 @@ func (t *tunDevice) create() (api.TunnelDevice, error) {
 		t.name = "usque"
 	}
 
+	// Disabled families are blocked by WFP, so don't assign them a dummy
+	// address or try to divert them by default route.
+	v4, err := windowsTUNAddress(t.account.IPv4, t.ipv4, 4)
+	if err != nil {
+		return nil, err
+	}
+	v6, err := windowsTUNAddress(t.account.IPv6, t.ipv6, 6)
+	if err != nil {
+		return nil, err
+	}
 	wAdapter, err := api.NewWintunAdapter(t.name)
 	if err != nil {
 		return nil, err
 	}
-
-	t.luid = wAdapter.LUID()
-	luid := winipcfg.LUID(t.luid)
-
-	// Assign an address for BOTH families. Enabled stacks get their real WARP
-	// address; a disabled stack gets a placeholder from a reserved range so that
-	// its default route (added by the route manager) is installable and its
-	// traffic is pulled into the TUN — where the engine black-holes it — instead
-	// of leaking out the physical NIC. The placeholder never sources real
-	// traffic because the engine drops the disabled family at the tunnel ingress.
-	var prefixes []netip.Prefix
-	if t.ipv4 {
-		prefixes = append(prefixes, netip.PrefixFrom(netip.MustParseAddr(t.account.IPv4), 32))
-	} else {
-		// TEST-NET-1 (RFC 5737): 192.0.2.0/24, guaranteed non-routable.
-		prefixes = append(prefixes, netip.PrefixFrom(netip.MustParseAddr("192.0.2.1"), 32))
-	}
-	if t.ipv6 {
-		prefixes = append(prefixes, netip.PrefixFrom(netip.MustParseAddr(t.account.IPv6), 128))
-	} else {
-		// Documentation prefix (RFC 3849): 2001:db8::/32, guaranteed non-routable.
-		prefixes = append(prefixes, netip.PrefixFrom(netip.MustParseAddr("2001:db8::1"), 128))
-	}
-	if err := luid.SetIPAddresses(prefixes); err != nil {
+	luid := winipcfg.LUID(wAdapter.LUID())
+	if err := configureWintun(luid, t.mtu, []netip.Prefix{v4, v6}); err != nil {
 		_ = wAdapter.Close()
-		return nil, fmt.Errorf("set IP addresses: %w", err)
+		return nil, err
 	}
-
-	// Configure BOTH address families' interface parameters. Both now carry an
-	// address (real or placeholder) and both default routes point at the TUN,
-	// so both interfaces must be set up for routing to install cleanly. The
-	// disabled family only ever black-holes traffic (dropped by the engine).
-	{
-		ipif, err := luid.IPInterface(windows.AF_INET)
-		if err != nil {
-			_ = wAdapter.Close()
-			return nil, fmt.Errorf("get IPv4 interface: %w", err)
-		}
-		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
-		ipif.DadTransmits = 0
-		ipif.ManagedAddressConfigurationSupported = false
-		ipif.OtherStatefulConfigurationSupported = false
-		ipif.NLMTU = uint32(t.mtu)
-		ipif.UseAutomaticMetric = false
-		ipif.Metric = 0
-		if err := ipif.Set(); err != nil {
-			_ = wAdapter.Close()
-			return nil, fmt.Errorf("set IPv4 interface: %w", err)
-		}
-	}
-
-	{
-		ipif, err := luid.IPInterface(windows.AF_INET6)
-		if err != nil {
-			_ = wAdapter.Close()
-			return nil, fmt.Errorf("get IPv6 interface: %w", err)
-		}
-		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
-		ipif.DadTransmits = 0
-		ipif.ManagedAddressConfigurationSupported = false
-		ipif.OtherStatefulConfigurationSupported = false
-		ipif.NLMTU = uint32(t.mtu)
-		ipif.UseAutomaticMetric = false
-		ipif.Metric = 0
-		if err := ipif.Set(); err != nil {
-			_ = wAdapter.Close()
-			return nil, fmt.Errorf("set IPv6 interface: %w", err)
-		}
-	}
-
+	t.luid = uint64(luid)
 	return wAdapter, nil
+}
+
+func windowsTUNAddress(value string, enabled bool, family int) (netip.Prefix, error) {
+	if !enabled {
+		return netip.Prefix{}, nil
+	}
+	addr, err := netip.ParseAddr(value)
+	if err != nil || addr.Is4() != (family == 4) || addr.IsUnspecified() || addr.IsMulticast() || addr.Is4In6() || addr.Zone() != "" {
+		return netip.Prefix{}, fmt.Errorf("invalid WARP IPv%d tunnel address %q", family, value)
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
+func configureWintun(luid winipcfg.LUID, mtu int, prefixes []netip.Prefix) error {
+	addresses := make([]netip.Prefix, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		if !prefix.IsValid() {
+			continue
+		}
+		addresses = append(addresses, prefix)
+		family := winipcfg.AddressFamily(windows.AF_INET6)
+		if prefix.Addr().Is4() {
+			family = windows.AF_INET
+		}
+		ipif, err := luid.IPInterface(family)
+		if err != nil {
+			return fmt.Errorf("get Wintun IP interface (family %d): %w", family, err)
+		}
+		ipif.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
+		ipif.DadTransmits = 0
+		ipif.ManagedAddressConfigurationSupported = false
+		ipif.OtherStatefulConfigurationSupported = false
+		ipif.NLMTU = uint32(mtu) // local link only, never lowered by tunnel PMTU
+		ipif.UseAutomaticMetric = false
+		ipif.Metric = 0
+		if err := ipif.Set(); err != nil {
+			return fmt.Errorf("set Wintun MTU %d (family %d): %w", mtu, family, err)
+		}
+		actual, err := luid.IPInterface(family)
+		if err != nil {
+			return fmt.Errorf("verify Wintun MTU (family %d): %w", family, err)
+		}
+		if actual.NLMTU != uint32(mtu) {
+			return fmt.Errorf("Wintun did not apply MTU %d (family %d reports %d)", mtu, family, actual.NLMTU)
+		}
+	}
+	if err := luid.SetIPAddresses(addresses); err != nil {
+		return fmt.Errorf("set Wintun IP addresses: %w", err)
+	}
+	return nil
 }

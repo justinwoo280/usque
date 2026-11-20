@@ -72,6 +72,19 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 	if err != nil {
 		return err
 	}
+	// Install the family guard before creating routes or dialing WARP. Keep it
+	// active across reconnects and until after route/device cleanup.
+	guard, err := startTUNFamilyGuard(settings, ob.endpoint)
+	if err != nil {
+		return fmt.Errorf("enforce disabled Windows address family: %w", err)
+	}
+	if guard != nil {
+		defer func() {
+			if err := guard.Close(); err != nil {
+				log.Printf("Warning: address family guard cleanup failed: %v", err)
+			}
+		}()
+	}
 
 	t := &tunDevice{
 		name:     settings.Name,
@@ -158,7 +171,8 @@ func runTunInbound(ctx context.Context, fc *config.FullConfig, ob *outboundBundl
 	ob.maintainCfg.MTU = settings.MTU
 	ob.maintainCfg.HookEnv = hookEnv
 	ob.maintainCfg.InterfaceUpdater = updater
-	// Drop the disabled families at the TUN ingress.
+	// Drop the disabled families that reach userspace as a second line of
+	// defense. On Windows the WFP guard also prevents bypass of the TUN.
 	ob.maintainCfg.BlockIPv4 = !settings.IPv4
 	ob.maintainCfg.BlockIPv6 = !settings.IPv6
 
